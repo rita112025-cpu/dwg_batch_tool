@@ -15,6 +15,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 import common  # noqa: E402
 import env_check  # noqa: E402
 import pipeline  # noqa: E402
+import dwg_version  # noqa: E402
 
 try:  # crisp text on high-DPI Windows displays
     import ctypes
@@ -206,9 +207,11 @@ class App:
         scanrow.pack(fill="x", padx=6, pady=(2, 6))
         self.btn_scan = ttk.Button(scanrow, text="掃描輸入資料夾 Scan", command=self._scan)
         self.btn_scan.pack(side="left")
-        lbl_scan = ttk.Label(scanrow, textvariable=self.v_scan, wraplength=520, justify="left")
+        self.btn_versions = ttk.Button(scanrow, text="產生 DWG/DWT 版本表", command=self._scan_versions)
+        self.btn_versions.pack(side="left", padx=(6, 0))
+        lbl_scan = ttk.Label(scanrow, textvariable=self.v_scan, wraplength=430, justify="left")
         lbl_scan.pack(side="left", padx=10, fill="x", expand=True)
-        self._wrap_to_width(lbl_scan, scanrow, margin=170)
+        self._wrap_to_width(lbl_scan, scanrow, margin=300)
 
         # ---- 2 執行內容 ----
         run = ttk.LabelFrame(main, text="② 執行內容　What to run（兩條流程各自獨立）")
@@ -298,7 +301,8 @@ class App:
         self._wrap_to_width(lr, rf)
         # one entry per output file; enabled only once the file exists
         groups = (
-            ("共用", (("開啟輸出資料夾", ""), ("開啟 errors.log", "logs/errors.log"))),
+            ("共用", (("開啟輸出資料夾", ""), ("開啟 errors.log", "logs/errors.log"),
+                    ("開啟 dwg_versions.csv", "csv/dwg_versions.csv"))),
             ("流程 A 結果", (("開啟 scada_hits.csv", "csv/scada_hits.csv"), ("開啟 object_hits.csv", "csv/object_hits.csv"),
                          ("開啟 file_index.csv", "csv/file_index.csv"))),
             ("流程 B 結果", (("開啟 project.db", "database/project.db"),
@@ -389,7 +393,7 @@ class App:
         self.v_result.set("分析中...")
         self._set_status("running", "分析工程資料中…")
         self.v_progress.set(0)
-        for b in (self.btn_start, self.btn_scan, self.btn_analysis, self.btn_files, self.btn_folder): b.configure(state="disabled")
+        for b in (self.btn_start, self.btn_scan, self.btn_versions, self.btn_analysis, self.btn_files, self.btn_folder): b.configure(state="disabled")
         self.btn_stop.configure(state="normal")
         def work():
             try:
@@ -407,7 +411,7 @@ class App:
     def _analysis_done(self, result):
         self.summary = result
         self.worker = None
-        for b in (self.btn_scan, self.btn_analysis, self.btn_files, self.btn_folder): b.configure(state="normal")
+        for b in (self.btn_scan, self.btn_versions, self.btn_analysis, self.btn_files, self.btn_folder): b.configure(state="normal")
         self.btn_start.configure(state="normal" if self.env_ok else "disabled")
         self.btn_stop.configure(state="disabled")
         state, verdict = classify_outcome(result)
@@ -538,6 +542,37 @@ class App:
         self.v_accore.set(f"accoreconsole 路徑：{r['accore'] or '未設定'}")
 
     # ---------- scan ----------
+    def _scan_versions(self):
+        """Read ACxxxx headers from DWG/DWT and export a version inventory CSV."""
+        if self._busy():
+            return
+        input_dir = Path(self.v_in.get().strip())
+        output_dir = Path(self.v_out.get().strip())
+        if not input_dir.is_dir():
+            messagebox.showerror("輸入資料夾不存在", str(input_dir))
+            return
+        if not str(output_dir).strip():
+            messagebox.showerror("請指定輸出資料夾", "")
+            return
+
+        csv_path = output_dir / "csv" / "dwg_versions.csv"
+        recursive = self.opts["recursive"].get()
+        self.btn_versions.configure(state="disabled")
+        self.v_scan.set("讀取 DWG/DWT 版本中...")
+
+        def work():
+            try:
+                rows = dwg_version.write_version_csv([input_dir], csv_path, recursive=recursive)
+                ok = sum(r["status"] == "OK" for r in rows)
+                unknown = sum(r["status"] == "UNKNOWN_CODE" for r in rows)
+                invalid = len(rows) - ok - unknown
+                dwt = sum(r["extension"] == ".dwt" for r in rows)
+                self.q.put(("versions_done", str(csv_path), len(rows), ok, unknown, invalid, dwt))
+            except Exception as exc:  # noqa: BLE001
+                self.q.put(("versions_err", str(exc)))
+
+        threading.Thread(target=work, daemon=True).start()
+
     def _scan(self):
         d = self.v_in.get().strip()
         rec = self.opts["recursive"].get()
@@ -571,6 +606,7 @@ class App:
         self.stop_event.clear()
         self.btn_start.configure(state="disabled")
         self.btn_scan.configure(state="disabled")
+        self.btn_versions.configure(state="disabled")
         self.btn_stop.configure(state="normal")
         self.btn_analysis.configure(state="disabled")
         self.v_progress.set(0)
@@ -603,6 +639,7 @@ class App:
         self.summary = s
         self.worker = None      # the worker has finished; lets the output buttons enable
         self.btn_scan.configure(state="normal")
+        self.btn_versions.configure(state="normal")
         self.btn_stop.configure(state="disabled")
         self.btn_analysis.configure(state="normal")
         self.btn_start.configure(state="normal" if self.env_ok else "disabled")
@@ -656,6 +693,18 @@ class App:
                 elif k == "scan_err":
                     self.v_scan.set("")
                     messagebox.showerror("掃描失敗", m[1])
+                elif k == "versions_done":
+                    _, csv_path, total, ok, unknown, invalid, dwt = m
+                    self.btn_versions.configure(state="normal")
+                    self.v_scan.set(
+                        f"版本表完成：{total} 檔（DWT {dwt}）｜已辨識：{ok}｜未知代碼：{unknown}｜異常：{invalid}")
+                    self._log("OK", f"DWG/DWT 版本表已輸出：{csv_path}")
+                    self._refresh_analysis_outputs()
+                elif k == "versions_err":
+                    self.btn_versions.configure(state="normal")
+                    self.v_scan.set("")
+                    self._log("ERROR", f"DWG/DWT 版本表失敗：{m[1]}")
+                    messagebox.showerror("版本表失敗", m[1])
         except queue.Empty:
             pass
         self.root.after(100, self._poll)

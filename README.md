@@ -56,6 +56,14 @@ tkinter 介面：選輸入/輸出資料夾、勾選處理選項、編輯關鍵�
 GUI log 寫入 `output\logs\gui.log`。掃描不會執行 AutoCAD、不修改任何檔案。
 「產生 CSV」控制 analyze 的 CSV；`scada_hits.csv` 只要勾選「SCADA 關鍵字搜尋」就會產生。
 
+### DWG / DWT 版本表（免 AutoCAD、免管理員）
+來源區的「產生 DWG/DWT 版本表」會直接唯讀檔案前 6 bytes 的 `ACxxxx` header，輸出 `output/csv/dwg_versions.csv`。
+- 支援 `.dwg` 與 `.dwt`；DWT 使用相同的 DWG header 判讀方式。
+- 不啟動 AutoCAD、不安裝 Shell Extension、不寫 Windows Registry、不需要系統管理員權限。
+- 欄位：`file`、`extension`、`format_code`、`format`、`status`。
+- `format` 表示「DWG 儲存格式世代」，不等於最後儲存該檔案的 AutoCAD 版本。例如 `AC1032` 顯示為 `AutoCAD 2018 format family`。
+- 未知的新 `ACxxxx` 代碼會保留原碼並標記 `UNKNOWN_CODE`，不會猜測版本。
+
 ### 桌面捷徑
 雙擊 `create_shortcut.bat` 會在桌面建立「DWG分析」捷徑（圖示為 `dwg_analysis.ico`）。
 捷徑存的是絕對路徑：**搬移或改名資料夾後，捷徑與圖示都會失效**，在新位置再執行一次 `create_shortcut.bat` 即可。
