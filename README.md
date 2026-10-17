@@ -61,7 +61,7 @@ GUI log 寫入 `output\logs\gui.log`。掃描不會執行 AutoCAD、不修改任
 - 支援 `.dwg` 與 `.dwt`；DWT 使用相同的 DWG header 判讀方式。
 - 不啟動 AutoCAD、不安裝 Shell Extension、不寫 Windows Registry、不需要系統管理員權限。
 - 欄位：`file`、`extension`、`format_code`、`format`、`status`。
-- `format` 表示「DWG 儲存格式世代」，不等於最後儲存該檔案的 AutoCAD 版本。例如 `AC1032` 顯示為 `AutoCAD 2018 format family`。
+- `format` 直接以「`ACxxxx`→西元年」顯示，一眼看懂版本與年份；例如 `AC1032` 顯示為 `AC1032→2018`。
 - 未知的新 `ACxxxx` 代碼會保留原碼並標記 `UNKNOWN_CODE`，不會猜測版本。
 
 ### 桌面捷徑

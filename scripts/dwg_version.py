@@ -16,21 +16,22 @@ SUPPORTED_EXTENSIONS = {".dwg", ".dwt"}
 
 # DWG format header codes.  The label describes the file format generation,
 # not necessarily the AutoCAD release that last saved the file.
+# `format` 直接以「ACxxxx→西元年」顯示，讓版本與年份一眼看懂。
 DWG_FORMATS = {
-    "AC1001": "AutoCAD 1.0 format",
-    "AC1002": "AutoCAD 2.5 format",
-    "AC1003": "AutoCAD 2.6 format",
-    "AC1004": "AutoCAD R9 format",
-    "AC1006": "AutoCAD R10 format",
-    "AC1009": "AutoCAD R11/R12 format",
-    "AC1012": "AutoCAD R13 format",
-    "AC1014": "AutoCAD R14 format",
-    "AC1015": "AutoCAD 2000 format family",
-    "AC1018": "AutoCAD 2004 format family",
-    "AC1021": "AutoCAD 2007 format family",
-    "AC1024": "AutoCAD 2010 format family",
-    "AC1027": "AutoCAD 2013 format family",
-    "AC1032": "AutoCAD 2018 format family",
+    "AC1001": "AC1001→1982",
+    "AC1002": "AC1002→1986",
+    "AC1003": "AC1003→1987",
+    "AC1004": "AC1004→1987",
+    "AC1006": "AC1006→1988",
+    "AC1009": "AC1009→1990/1992",
+    "AC1012": "AC1012→1994",
+    "AC1014": "AC1014→1997",
+    "AC1015": "AC1015→2000",
+    "AC1018": "AC1018→2004",
+    "AC1021": "AC1021→2007",
+    "AC1024": "AC1024→2010",
+    "AC1027": "AC1027→2013",
+    "AC1032": "AC1032→2018",
 }
 
 CSV_FIELDS = ("file", "extension", "format_code", "format", "status")
