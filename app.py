@@ -46,6 +46,22 @@ LOG_STATE = {"OK": "success", "INFO": "idle", "WARN": "warning", "ERROR": "faile
 LOG_TEXT = {"OK": "✓ 成功", "INFO": "· 資訊", "WARN": "⚠ 警告", "ERROR": "✗ 失敗"}
 LOG_FG = {"success": "#1B6E2C", "warning": "#8A5A00", "failed": "#B3261E"}                # on white, contrast >= 5.5:1
 
+PRIMARY_RESULTS = {
+    "version": ("csv/dwg_versions.csv",),
+    "dwg": ("csv/scada_hits.csv", "csv/file_index.csv"),
+    "analysis": ("cross_reference/cross_reference.csv", "database/project.db"),
+}
+
+
+def get_primary_result(mode, output_dir):
+    """Return the first existing primary result for *mode*, or None."""
+    out = Path(output_dir)
+    for rel in PRIMARY_RESULTS.get(mode, ()):
+        candidate = out / rel
+        if candidate.is_file():
+            return candidate
+    return None
+
 
 def classify_outcome(s):
     """Run summary -> (state, one-line verdict). Partial failure is a warning, not a failure and not a success."""
@@ -125,15 +141,17 @@ class App:
     def __init__(self, root):
         self.root = root
         root.title("SCADA DWG Analyzer")
-        root.geometry("900x740")
-        root.minsize(760, 620)
+        root.geometry("1000x760")
+        root.minsize(900, 650)
         self.cfg = common.load_config()
         self.q = queue.Queue()
         self.stop_event = threading.Event()
         self.worker = None
+        self._can_stop = False
         self.env_ok = False
         self.summary = None
         self.analysis_inputs = []
+        self.v_mode = tk.StringVar(value="version")
 
         self.v_in = tk.StringVar(value=str(common.resolve(self.cfg, "input_dir")))
         self.v_out = tk.StringVar(value=str(common.resolve(self.cfg, "output_dir")))
@@ -151,8 +169,7 @@ class App:
         self._check_env()
 
     # ---------- layout ----------
-    # Four numbered sections in one scrollable column:  1 source | 2 what to run (A: DWG->DXF, B: analysis)
-    # | 3 progress + log | 4 results.  Every control lives inside the scroll area, so nothing is unreachable.
+    # Five numbered sections in one scrollable column. Only the selected job's settings are visible.
     def _build(self):
         pad = dict(padx=8, pady=4)
         shell = ttk.Frame(self.root)
@@ -174,117 +191,146 @@ class App:
         self.root.bind('<MouseWheel>', scroll)
         self.root.bind_all('<FocusIn>', self._on_focus_in, add='+')   # Tab to an off-screen control scrolls to it
 
-        # ---- 1 來源 ----
-        src = ttk.LabelFrame(main, text="① 來源　Source")
+        # ---- 1 基本設定 ----
+        src = ttk.LabelFrame(main, text="① 基本設定")
         src.pack(fill="x", **pad)
         env = ttk.Frame(src)
         env.pack(fill="x", padx=6, pady=(4, 0))
+        self.v_env_summary = tk.StringVar(value="環境：Python …　AutoCAD …　accoreconsole …")
+        ttk.Label(env, textvariable=self.v_env_summary, justify="left").pack(side="left", fill="x", expand=True)
+        self.btn_env_details = ttk.Button(env, text="環境詳細資訊 ▸", command=self._toggle_env_details)
+        self.btn_env_details.pack(side="left", padx=4)
+        self.btn_recheck = ttk.Button(env, text="重新檢查", command=self._check_env)
+        self.btn_recheck.pack(side="left", padx=(4, 0))
+
+        self.env_details = ttk.Frame(src)
         self.env_labels = {}
-        for i, k in enumerate(self.v_env):
-            lb = ttk.Label(env, textvariable=self.v_env[k], wraplength=380, justify="left")
-            lb.grid(row=i // 2, column=i % 2, sticky="w", padx=(0, 16), pady=1)
+        for k in self.v_env:
+            lb = ttk.Label(self.env_details, textvariable=self.v_env[k], wraplength=800, justify="left")
+            lb.pack(fill="x", padx=6, pady=1)
             self.env_labels[k] = lb
-        env.columnconfigure(0, weight=1)
-        env.columnconfigure(1, weight=1)
-        ttk.Button(env, text="重新檢查", command=self._check_env).grid(row=0, column=2, rowspan=2, padx=4)
         self.v_accore = tk.StringVar(value="")
-        self.lbl_accore = ttk.Label(src, textvariable=self.v_accore, wraplength=700, justify="left")
-        self.lbl_accore.pack(fill="x", padx=6, pady=(2, 0))
-        self._wrap_to_width(self.lbl_accore, src)
-        note = ttk.Label(src, text="AutoCAD／accoreconsole 只在處理 DWG（流程 A）時需要；DXF、IFC、Excel、PDF、DOCX、"
-                                   "Navisworks 的分析（流程 B）不依賴 AutoCAD。", wraplength=700, justify="left")
-        note.pack(fill="x", padx=6, pady=(2, 4))
-        self._wrap_to_width(note, src)
+        self.lbl_accore = ttk.Label(self.env_details, textvariable=self.v_accore, wraplength=800, justify="left")
+        self.lbl_accore.pack(fill="x", padx=6, pady=(1, 4))
+        self._wrap_to_width(self.lbl_accore, self.env_details)
 
         paths = ttk.Frame(src)
         paths.pack(fill="x", padx=6, pady=2)
-        for r, (label, var) in enumerate((("輸入資料夾 Input", self.v_in), ("輸出資料夾 Output", self.v_out))):
-            ttk.Label(paths, text=label, width=16).grid(row=r, column=0, sticky="w", pady=3)
+        self.browse_buttons = []
+        for r, (label, var) in enumerate((("輸入資料夾", self.v_in), ("輸出資料夾", self.v_out))):
+            ttk.Label(paths, text=label, width=12).grid(row=r, column=0, sticky="w", pady=3)
             ttk.Entry(paths, textvariable=var).grid(row=r, column=1, sticky="ew", pady=3, padx=4)
-            ttk.Button(paths, text="Browse", command=lambda v=var: self._browse(v)).grid(row=r, column=2, padx=4)
+            button = ttk.Button(paths, text="瀏覽", command=lambda v=var: self._browse(v))
+            button.grid(row=r, column=2, padx=4)
+            self.browse_buttons.append(button)
         paths.columnconfigure(1, weight=1)
-        scanrow = ttk.Frame(src)
-        scanrow.pack(fill="x", padx=6, pady=(2, 6))
-        self.btn_scan = ttk.Button(scanrow, text="掃描輸入資料夾 Scan", command=self._scan)
-        self.btn_scan.pack(side="left")
-        self.btn_versions = ttk.Button(scanrow, text="產生 DWG/DWT 版本表", command=self._scan_versions)
-        self.btn_versions.pack(side="left", padx=(6, 0))
-        lbl_scan = ttk.Label(scanrow, textvariable=self.v_scan, wraplength=430, justify="left")
-        lbl_scan.pack(side="left", padx=10, fill="x", expand=True)
-        self._wrap_to_width(lbl_scan, scanrow, margin=300)
 
-        # ---- 2 執行內容 ----
-        run = ttk.LabelFrame(main, text="② 執行內容　What to run（兩條流程各自獨立）")
-        run.pack(fill="x", **pad)
-        cols = ttk.Frame(run)
-        cols.pack(fill="x", padx=6, pady=4)
-        cols.columnconfigure(0, weight=1, uniform="flow")
-        cols.columnconfigure(1, weight=1, uniform="flow")
+        # ---- 2 我要做什麼 ----
+        selector = ttk.LabelFrame(main, text="② 我要做什麼？")
+        selector.pack(fill="x", **pad)
+        radio_row = ttk.Frame(selector)
+        radio_row.pack(fill="x", padx=6, pady=6)
+        self.mode_buttons = []
+        for value, text in (("scan", "掃描資料夾"), ("version", "DWG / DWT 版本表"),
+                            ("dwg", "DWG 轉 DXF + 解析"), ("analysis", "工程資料分析")):
+            radio = ttk.Radiobutton(radio_row, text=text, value=value, variable=self.v_mode,
+                                    command=self._refresh_mode_ui)
+            radio.pack(side="left", padx=(0, 18))
+            self.mode_buttons.append(radio)
 
-        fa = ttk.LabelFrame(cols, text="A．DWG 批次轉 DXF（需要 AutoCAD）")
-        fa.grid(row=0, column=0, sticky="nsew", padx=(0, 4))
-        na = ttk.Label(fa, text="讀取輸入資料夾內的 .dwg，用 accoreconsole 轉成 DXF，再解析並搜尋 SCADA 關鍵字。",
-                       wraplength=340, justify="left")
-        na.pack(fill="x", padx=6, pady=(4, 2))
-        self._wrap_to_width(na, fa)
-        grid = ttk.Frame(fa)
-        grid.pack(fill="x", padx=6)
+        # ---- 3 本工作設定 ----
+        mode_box = ttk.LabelFrame(main, text="③ 本工作設定")
+        mode_box.pack(fill="x", **pad)
+        self.mode_frame = ttk.Frame(mode_box)
+        self.mode_frame.pack(fill="x", padx=6, pady=6)
+        self.mode_frames = {}
+
+        scan = ttk.Frame(self.mode_frame)
+        self.mode_frames["scan"] = scan
+        ttk.Label(scan, text="掃描資料夾", font=(tkfont.nametofont("TkDefaultFont").actual("family"), 11)).pack(anchor="w")
+        ttk.Label(scan, text="掃描輸入資料夾中的工程檔案，不修改任何來源檔案。", justify="left").pack(anchor="w", pady=(2, 6))
+        ttk.Checkbutton(scan, text="遞迴搜尋子資料夾", variable=self.opts["recursive"]).pack(anchor="w")
+        self.btn_scan = ttk.Button(scan, text="開始掃描", command=self._scan)
+        self.btn_scan.pack(anchor="w", pady=(8, 0))
+
+        version = ttk.Frame(self.mode_frame)
+        self.mode_frames["version"] = version
+        ttk.Label(version, text="DWG / DWT 版本表", font=(tkfont.nametofont("TkDefaultFont").actual("family"), 11)).pack(anchor="w")
+        ttk.Label(version, text="直接讀取 DWG / DWT 檔頭版本碼。\n不需要 AutoCAD、不修改圖檔。",
+                  justify="left").pack(anchor="w", pady=(2, 6))
+        ttk.Checkbutton(version, text="遞迴搜尋子資料夾", variable=self.opts["recursive"]).pack(anchor="w")
+        self.btn_versions = ttk.Button(version, text="產生版本表", command=self._scan_versions)
+        self.btn_versions.pack(anchor="w", pady=(8, 0))
+
+        dwg = ttk.Frame(self.mode_frame)
+        self.mode_frames["dwg"] = dwg
+        ttk.Label(dwg, text="DWG 轉 DXF + 解析", font=(tkfont.nametofont("TkDefaultFont").actual("family"), 11)).pack(anchor="w")
+        ttk.Label(dwg, text="使用 accoreconsole 將 DWG 轉 DXF，再執行圖面解析及 SCADA 搜尋。",
+                  justify="left").pack(anchor="w", pady=(2, 6))
+        grid = ttk.Frame(dwg)
+        grid.pack(fill="x")
         items = [("recursive", "遞迴搜尋子資料夾"), ("convert", "DWG → DXF"),
                  ("analyze", "DXF 內容解析"), ("scada", "SCADA 關鍵字搜尋"),
                  ("csv", "產生 CSV"), ("json", "產生 JSON"), ("overwrite", "覆寫既有 DXF")]
         for i, (k, t) in enumerate(items):
-            ttk.Checkbutton(grid, text=t, variable=self.opts[k]).grid(row=i // 2, column=i % 2, sticky="w", padx=4, pady=1)
-        self.btn_start = ttk.Button(fa, text="開始 DWG 轉 DXF＋解析", command=self._start)
-        self.btn_start.pack(anchor="w", padx=6, pady=6)
+            ttk.Checkbutton(grid, text=t, variable=self.opts[k]).grid(row=i // 2, column=i % 2, sticky="w", padx=(0, 24), pady=2)
 
-        fb = ttk.LabelFrame(cols, text="B．工程資料分析（不需要 AutoCAD）")
-        fb.grid(row=0, column=1, sticky="nsew", padx=(4, 0))
-        nb = ttk.Label(fb, text="直接解析 DXF、IFC、Excel/CSV、PDF、DOCX、Navisworks；選到 .dwg 時才會用到 AutoCAD。"
-                                "「遞迴搜尋」沿用左側設定。", wraplength=340, justify="left")
-        nb.pack(fill="x", padx=6, pady=(4, 2))
-        self._wrap_to_width(nb, fb)
+        self.kw_toggle = ttk.Button(dwg, text="進階設定：SCADA 關鍵字 ▸", command=self._toggle_keywords)
+        self.kw_toggle.pack(anchor="w", pady=(8, 2))
+        self.kw_frame = ttk.Frame(dwg)
+        self.kw_text = tk.Text(self.kw_frame, height=4, width=30, font=("Consolas", 10))
+        self.kw_text.pack(side="left", fill="both", expand=True, pady=4)
+        self.kw_text.insert("1.0", "\n".join(self.cfg.get("keywords", [])))
+        self.kw_text.bind("<Tab>", lambda e: (e.widget.tk_focusNext().focus_set(), "break")[1])
+        self.kw_text.bind("<Shift-Tab>", lambda e: (e.widget.tk_focusPrev().focus_set(), "break")[1])
+        self.btn_save_config = ttk.Button(self.kw_frame, text="儲存設定", command=self._save_config)
+        self.btn_save_config.pack(side="right", padx=8)
+        self.btn_start = ttk.Button(dwg, text="開始處理 DWG", command=self._start)
+        self.btn_start.pack(anchor="w", pady=(8, 0))
+
+        analysis = ttk.Frame(self.mode_frame)
+        self.mode_frames["analysis"] = analysis
+        ttk.Label(analysis, text="工程資料分析", font=(tkfont.nametofont("TkDefaultFont").actual("family"), 11)).pack(anchor="w")
+        ttk.Label(analysis, text="分析 DXF、IFC、Excel/CSV、PDF、DOCX、Navisworks。\n遇到 DWG 時才可能需要 AutoCAD。",
+                  justify="left").pack(anchor="w", pady=(2, 6))
         self.v_analysis = tk.StringVar(value="使用上方輸入資料夾，或選擇多個檔案")
-        la = ttk.Label(fb, textvariable=self.v_analysis, wraplength=340, justify="left")
-        la.pack(fill="x", padx=6, pady=2)
-        self._wrap_to_width(la, fb)
-        brow = ttk.Frame(fb)
-        brow.pack(fill="x", padx=6, pady=2)
+        ttk.Label(analysis, text="目前來源：").pack(anchor="w")
+        la = ttk.Label(analysis, textvariable=self.v_analysis, wraplength=800, justify="left")
+        la.pack(fill="x", pady=2)
+        self._wrap_to_width(la, analysis)
+        brow = ttk.Frame(analysis)
+        brow.pack(fill="x", pady=2)
         self.btn_files = ttk.Button(brow, text="選擇檔案", command=self._select_analysis_files)
         self.btn_files.pack(side="left")
         self.btn_folder = ttk.Button(brow, text="使用輸入資料夾", command=self._analysis_folder)
         self.btn_folder.pack(side="left", padx=6)
-        self.btn_analysis = ttk.Button(fb, text="開始分析工程資料", command=self._start_analysis)
-        self.btn_analysis.pack(anchor="w", padx=6, pady=6)
+        self.btn_analysis = ttk.Button(analysis, text="開始資料分析", command=self._start_analysis)
+        self.btn_analysis.pack(anchor="w", pady=(6, 0))
 
-        kw = ttk.LabelFrame(run, text="SCADA 關鍵字 Keywords（兩條流程共用，一行一個）")
-        kw.pack(fill="x", padx=6, pady=(2, 6))
-        self.kw_text = tk.Text(kw, height=3, width=30, font=("Consolas", 10))
-        self.kw_text.pack(side="left", fill="both", expand=True, padx=6, pady=4)
-        self.kw_text.insert("1.0", "\n".join(self.cfg.get("keywords", [])))
-        self.kw_text.bind("<Tab>", lambda e: (e.widget.tk_focusNext().focus_set(), "break")[1])
-        self.kw_text.bind("<Shift-Tab>", lambda e: (e.widget.tk_focusPrev().focus_set(), "break")[1])
-        ttk.Button(kw, text="儲存設定", command=self._save_config).pack(side="right", padx=8)
-
-        # ---- 3 執行狀態 ----
-        st = ttk.LabelFrame(main, text="③ 執行狀態　Progress")
+        # ---- 4 執行狀態 ----
+        st = ttk.LabelFrame(main, text="④ 執行狀態")
         st.pack(fill="both", expand=True, **pad)
         pf = ttk.Frame(st)
         pf.pack(fill="x", padx=6, pady=(4, 0))
-        self.btn_stop = ttk.Button(pf, text="停止 Stop", command=self._stop, state="disabled")
-        self.btn_stop.pack(side="left")
         self.progress_bar = ProgressBar(pf, self.v_progress)
-        self.progress_bar.pack(side="left", fill="x", expand=True, padx=8)
-        ttk.Label(pf, textvariable=self.v_ptext, width=34).pack(side="left")
-        cur = ttk.Label(st, textvariable=self.v_current, anchor="w", wraplength=760, justify="left")
-        cur.pack(fill="x", padx=8)
+        self.progress_bar.pack(side="left", fill="x", expand=True)
+        ttk.Label(pf, textvariable=self.v_ptext, width=28).pack(side="left", padx=(8, 0))
+        cur = ttk.Label(st, textvariable=self.v_current, anchor="w", wraplength=800, justify="left")
+        cur.pack(fill="x", padx=8, pady=(3, 0))
         self._wrap_to_width(cur, st)
-        self.log_box = scrolledtext.ScrolledText(st, height=6, state="disabled", font=("Consolas", 9))
-        self.log_box.pack(fill="both", expand=True, padx=6, pady=6)
+        self.btn_stop = ttk.Button(st, text="停止", command=self._stop, state="disabled")
+        self.btn_stop.pack(anchor="w", padx=8, pady=(4, 2))
+        self.log_toggle = ttk.Button(st, text="執行記錄 ▾", command=self._toggle_log)
+        self.log_toggle.pack(anchor="w", padx=8, pady=(2, 0))
+        self.log_frame = ttk.Frame(st)
+        self.log_frame.pack(fill="both", expand=True, padx=6, pady=6)
+        self.log_box = scrolledtext.ScrolledText(self.log_frame, height=7, state="disabled", font=("Consolas", 9))
+        self.log_box.pack(fill="both", expand=True)
         for state, color in LOG_FG.items():
             self.log_box.tag_configure(state, foreground=color)
 
-        # ---- 4 結果 ----
-        rf = ttk.LabelFrame(main, text="④ 結果　Results")
+        # ---- 5 結果 ----
+        rf = ttk.LabelFrame(main, text="⑤ 結果")
         rf.pack(fill="x", **pad)
         self.result_frame = rf
         # outcome banner: symbol + word + colour. Regular weight: bold falls back to a synthetic face for some CJK glyphs.
@@ -299,13 +345,23 @@ class App:
         lr = ttk.Label(rf, textvariable=self.v_result_body, justify="left", wraplength=760)
         lr.pack(fill="x", padx=8, pady=2)
         self._wrap_to_width(lr, rf)
-        # one entry per output file; enabled only once the file exists
+        quick = ttk.Frame(rf)
+        quick.pack(fill="x", padx=8, pady=(4, 2))
+        self.btn_output = ttk.Button(quick, text="開啟輸出資料夾", command=lambda: self._open(""), state="disabled")
+        self.btn_output.pack(side="left")
+        self.btn_primary = ttk.Button(quick, text="開啟主要結果", command=self._open_primary, state="disabled")
+        self.btn_primary.pack(side="left", padx=6)
+        self.btn_errors = ttk.Button(quick, text="開啟 errors.log", command=lambda: self._open("logs/errors.log"), state="disabled")
+        self.btn_errors.pack(side="left")
+
+        self.more_toggle = ttk.Button(rf, text="更多結果 ▸", command=self._toggle_more_results)
+        self.more_toggle.pack(anchor="w", padx=8, pady=(4, 2))
+        self.more_results = ttk.Frame(rf)
         groups = (
-            ("共用", (("開啟輸出資料夾", ""), ("開啟 errors.log", "logs/errors.log"),
-                    ("開啟 dwg_versions.csv", "csv/dwg_versions.csv"))),
-            ("流程 A 結果", (("開啟 scada_hits.csv", "csv/scada_hits.csv"), ("開啟 object_hits.csv", "csv/object_hits.csv"),
+            ("共用", (("開啟 errors.log", "logs/errors.log"), ("開啟 dwg_versions.csv", "csv/dwg_versions.csv"))),
+            ("DWG 結果", (("開啟 scada_hits.csv", "csv/scada_hits.csv"), ("開啟 object_hits.csv", "csv/object_hits.csv"),
                          ("開啟 file_index.csv", "csv/file_index.csv"))),
-            ("流程 B 結果", (("開啟 project.db", "database/project.db"),
+            ("工程分析結果", (("開啟 project.db", "database/project.db"),
                          ("開啟 cross_reference.csv", "cross_reference/cross_reference.csv"),
                          ("開啟 requirements.csv", "docx/requirements.csv"), ("開啟 boq_items.csv", "excel/boq_items.csv"),
                          ("開啟 ifc_objects.csv", "ifc/ifc_objects.csv"),
@@ -313,19 +369,22 @@ class App:
         )
         self.output_buttons = {}
         self.analysis_outputs = {}
+        self.result_buttons = [("", self.btn_output), ("logs/errors.log", self.btn_errors)]
         for title, files in groups:
-            box = ttk.Frame(rf)
+            box = ttk.Frame(self.more_results)
             box.pack(fill="x", padx=8, pady=(2, 4))
             ttk.Label(box, text=title).grid(row=0, column=0, columnspan=3, sticky="w")
             for i, (text, rel) in enumerate(files):
                 b = ttk.Button(box, text=text, command=lambda r=rel: self._open(r), state="disabled")
                 b.grid(row=1 + i // 3, column=i % 3, sticky="ew", padx=(0, 6), pady=2)
                 self.output_buttons[rel] = b
-                if title == "流程 B 結果":
+                self.result_buttons.append((rel, b))
+                if title == "工程分析結果":
                     self.analysis_outputs[rel] = b
             for col in range(3):
                 box.columnconfigure(col, weight=1, uniform=title)
         self.v_out.trace_add('write', lambda *args: self._refresh_analysis_outputs())
+        self._refresh_mode_ui()
         self._refresh_analysis_outputs()
 
     def _wrap_to_width(self, label, container, margin=40):
@@ -361,6 +420,66 @@ class App:
         except tk.TclError:
             pass
 
+    def _toggle_env_details(self):
+        if self.env_details.winfo_manager():
+            self.env_details.pack_forget()
+            self.btn_env_details.configure(text="環境詳細資訊 ▸")
+        else:
+            self.env_details.pack(fill="x", padx=6, pady=(2, 4), before=self.env_details.master.winfo_children()[-1])
+            self.btn_env_details.configure(text="環境詳細資訊 ▾")
+
+    def _toggle_keywords(self):
+        if self.kw_frame.winfo_manager():
+            self.kw_frame.pack_forget()
+            self.kw_toggle.configure(text="進階設定：SCADA 關鍵字 ▸")
+        else:
+            self.kw_frame.pack(fill="x", pady=(0, 4), before=self.btn_start)
+            self.kw_toggle.configure(text="進階設定：SCADA 關鍵字 ▾")
+
+    def _toggle_log(self):
+        if self.log_frame.winfo_manager():
+            self.log_frame.pack_forget()
+            self.log_toggle.configure(text="執行記錄 ▸")
+        else:
+            self.log_frame.pack(fill="both", expand=True, padx=6, pady=6)
+            self.log_toggle.configure(text="執行記錄 ▾")
+
+    def _toggle_more_results(self):
+        if self.more_results.winfo_manager():
+            self.more_results.pack_forget()
+            self.more_toggle.configure(text="更多結果 ▸")
+        else:
+            self.more_results.pack(fill="x", after=self.more_toggle)
+            self.more_toggle.configure(text="更多結果 ▾")
+
+    def _refresh_mode_ui(self):
+        """Show only the selected job settings without changing any saved/user-entered values."""
+        for frame in self.mode_frames.values():
+            frame.pack_forget()
+        self.mode_frames[self.v_mode.get()].pack(fill="x")
+        self._set_busy_ui(self._busy())
+        self._refresh_analysis_outputs()
+
+    def _set_busy_ui(self, busy):
+        """Centralised enable/disable policy for all job controls."""
+        state = "disabled" if busy else "normal"
+        for widget in (self.mode_buttons + self.browse_buttons +
+                       [self.btn_scan, self.btn_versions, self.btn_analysis,
+                        self.btn_files, self.btn_folder, self.btn_recheck, self.btn_save_config]):
+            widget.configure(state=state)
+        self.btn_start.configure(state="normal" if not busy and self.env_ok else "disabled")
+        cancellable = busy and self._can_stop
+        self.btn_stop.configure(state="normal" if cancellable else "disabled")
+        self._refresh_analysis_outputs()
+
+    def _get_primary_result(self):
+        return get_primary_result(self.v_mode.get(), self.v_out.get().strip())
+
+    def _open_primary(self):
+        target = self._get_primary_result()
+        if target is not None:
+            os.startfile(str(target))  # noqa: S606 (Windows only)
+
     # ---------- helpers ----------
     def _select_analysis_files(self):
         paths = filedialog.askopenfilenames(title="選擇工程資料", filetypes=[("工程資料", "*.dwg *.dxf *.ifc *.xlsx *.xlsm *.csv *.pdf *.docx *.xml *.html"), ("所有檔案", "*.*")])
@@ -375,10 +494,12 @@ class App:
     def _refresh_analysis_outputs(self):
         """One entry per output file: enabled only when it exists (folder button: when the folder exists) and no run is active."""
         out = Path(self.v_out.get().strip() or ".")
-        for rel, button in self.output_buttons.items():
+        for rel, button in self.result_buttons:
             target = out / rel if rel else out
             exists = target.is_dir() if not rel else target.is_file()
             button.configure(state="normal" if exists and not self._busy() else "disabled")
+        primary = self._get_primary_result()
+        self.btn_primary.configure(state="normal" if primary is not None and not self._busy() else "disabled")
 
     def _start_analysis(self):
         if self._busy(): return
@@ -389,12 +510,13 @@ class App:
             messagebox.showerror("路徑錯誤", "請選擇存在的輸入檔案／資料夾，並指定輸出資料夾。")
             return
         self.stop_event.clear()
+        self._can_stop = True
         self.summary = None
         self.v_result.set("分析中...")
         self._set_status("running", "分析工程資料中…")
         self.v_progress.set(0)
-        for b in (self.btn_start, self.btn_scan, self.btn_versions, self.btn_analysis, self.btn_files, self.btn_folder): b.configure(state="disabled")
-        self.btn_stop.configure(state="normal")
+        self.v_ptext.set("")
+        self.v_current.set("")
         def work():
             try:
                 result = pipeline.run_pipeline(cfg, dict(multiformat=True, inputs=inputs),
@@ -406,14 +528,13 @@ class App:
                 self.q.put(('analysis_done', dict(fatal=str(exc), total=0, ok=0, failed=0, warnings=0, stopped=False)))
         self.worker = threading.Thread(target=work, daemon=True)
         self.worker.start()
-        self._refresh_analysis_outputs()
+        self._set_busy_ui(True)
 
     def _analysis_done(self, result):
         self.summary = result
         self.worker = None
-        for b in (self.btn_scan, self.btn_versions, self.btn_analysis, self.btn_files, self.btn_folder): b.configure(state="normal")
-        self.btn_start.configure(state="normal" if self.env_ok else "disabled")
-        self.btn_stop.configure(state="disabled")
+        self._can_stop = False
+        self._set_busy_ui(False)
         state, verdict = classify_outcome(result)
         st = STATE[state]
         failed_files = result.get('failed_files', [])
@@ -426,7 +547,6 @@ class App:
                           + (f"\n\n失敗檔案：\n{shown}" if failed_files else ""))
         self._set_status(state, verdict)
         self.v_progress.set(100 if not result['stopped'] else self.v_progress.get())
-        self._refresh_analysis_outputs()
         self._reveal(self.result_frame)
 
     def _browse(self, var):
@@ -488,6 +608,7 @@ class App:
     def _check_env(self):
         for v in self.v_env.values():
             v.set(v.get().split(":")[0] + ": ...")
+        self.btn_recheck.configure(state="disabled")
         self.btn_start.configure(state="disabled")
 
         def work():
@@ -534,11 +655,16 @@ class App:
         self.v_env["AutoCAD"].set(f"AutoCAD: {mark(r['accore_ok'])} {r['autocad']}")
         self.v_env["accoreconsole"].set(f"accoreconsole: {mark(r['accore_ok'])}")
         self.env_ok = r["ok"]
+        self.v_env_summary.set(
+            f"環境：Python {'✓' if r['python'] else '✗'}　"
+            f"AutoCAD {'✓' if r['accore_ok'] else '✗'}　"
+            f"accoreconsole {'✓' if r['accore_ok'] else '✗'}")
         for line in r["lines"]:
             self._log("INFO", line)
         if not r["accore_ok"]:
             self._log("ERROR", "accoreconsole NOT FOUND，無法開始處理")
-        self.btn_start.configure(state="normal" if self.env_ok and not self._busy() else "disabled")
+        self.btn_recheck.configure(state="normal" if not self._busy() else "disabled")
+        self._set_busy_ui(self._busy())
         self.v_accore.set(f"accoreconsole 路徑：{r['accore'] or '未設定'}")
 
     # ---------- scan ----------
@@ -557,8 +683,13 @@ class App:
 
         csv_path = output_dir / "csv" / "dwg_versions.csv"
         recursive = self.opts["recursive"].get()
-        self.btn_versions.configure(state="disabled")
+        self._can_stop = False
         self.v_scan.set("讀取 DWG/DWT 版本中...")
+        self.v_result.set("處理中...")
+        self._set_status("running", "讀取 DWG / DWT 版本中…")
+        self.v_progress.set(0)
+        self.v_ptext.set("")
+        self.v_current.set("")
 
         def work():
             try:
@@ -571,11 +702,19 @@ class App:
             except Exception as exc:  # noqa: BLE001
                 self.q.put(("versions_err", str(exc)))
 
-        threading.Thread(target=work, daemon=True).start()
+        self.worker = threading.Thread(target=work, daemon=True)
+        self.worker.start()
+        self._set_busy_ui(True)
 
     def _scan(self):
+        if self._busy():
+            return
         d = self.v_in.get().strip()
         rec = self.opts["recursive"].get()
+        self._can_stop = False
+        if not Path(d).is_dir():
+            messagebox.showerror("輸入資料夾不存在", d)
+            return
 
         def work():
             try:
@@ -583,7 +722,14 @@ class App:
             except Exception as e:  # noqa: BLE001
                 self.q.put(("scan_err", str(e)))
         self.v_scan.set("掃描中...")
-        threading.Thread(target=work, daemon=True).start()
+        self.v_result.set("處理中...")
+        self._set_status("running", "掃描資料夾中…")
+        self.v_progress.set(0)
+        self.v_ptext.set("")
+        self.v_current.set("")
+        self.worker = threading.Thread(target=work, daemon=True)
+        self.worker.start()
+        self._set_busy_ui(True)
 
     # ---------- run ----------
     def _busy(self):
@@ -591,6 +737,9 @@ class App:
 
     def _start(self):
         if self._busy():
+            return
+        if not self.env_ok:
+            messagebox.showerror("無法處理 DWG", "找不到可用的 accoreconsole；請先完成環境設定並重新檢查。")
             return
         cfg = self._current_cfg()
         if not Path(cfg["input_dir"]).is_dir():
@@ -604,11 +753,7 @@ class App:
             return
         opts = {k: v.get() for k, v in self.opts.items()}
         self.stop_event.clear()
-        self.btn_start.configure(state="disabled")
-        self.btn_scan.configure(state="disabled")
-        self.btn_versions.configure(state="disabled")
-        self.btn_stop.configure(state="normal")
-        self.btn_analysis.configure(state="disabled")
+        self._can_stop = True
         self.v_progress.set(0)
         self.v_ptext.set("")
         self.v_result.set("處理中...")
@@ -629,6 +774,7 @@ class App:
             self.q.put(("done", s))
         self.worker = threading.Thread(target=work, daemon=True)
         self.worker.start()
+        self._set_busy_ui(True)
 
     def _stop(self):
         self.stop_event.set()
@@ -638,11 +784,8 @@ class App:
     def _on_done(self, s):
         self.summary = s
         self.worker = None      # the worker has finished; lets the output buttons enable
-        self.btn_scan.configure(state="normal")
-        self.btn_versions.configure(state="normal")
-        self.btn_stop.configure(state="disabled")
-        self.btn_analysis.configure(state="normal")
-        self.btn_start.configure(state="normal" if self.env_ok else "disabled")
+        self._can_stop = False
+        self._set_busy_ui(False)
         state, verdict = classify_outcome(s)
         head = f"{STATE[state]['symbol']} {STATE[state]['label']}：{verdict}"
         if not s["fatal"] and not s["stopped"]:
@@ -659,7 +802,6 @@ class App:
             + (f"\n錯誤：{s['fatal']}" if s["fatal"] else "")
             + (f"\n\n失敗檔案：\n{shown}" if failed_files else ""))
         self._set_status(state, verdict)
-        self._refresh_analysis_outputs()
         self._reveal(self.result_frame)
 
     def _poll(self):
@@ -673,7 +815,7 @@ class App:
                     _, stage, i, n, cur = m
                     pct = 100.0 * i / n if n else 0
                     self.v_progress.set(pct)
-                    self.v_ptext.set(f"[{stage}] 目前檔案 {i} / {n}    進度 {pct:.1f}%")
+                    self.v_ptext.set(f"{pct:.1f}%　{stage} {i} / {n}")
                     self.v_current.set(f"目前處理：{cur}")
                 elif k == "done":
                     self._on_done(m[1])
@@ -685,24 +827,50 @@ class App:
                     self._on_env(m[1])
                 elif k == "scan":
                     r = m[1]
+                    self.worker = None
+                    self._can_stop = False
+                    self._set_busy_ui(False)
                     self.v_scan.set(
                         f"找到 DWG：{r['dwg']}｜DXF：{r['dxf']}｜總容量：{pipeline.fmt_size(r['size'])}｜"
                         f"資料夾：{r['folders']}｜中文檔名：{r['chinese']}｜空白路徑：{r['spaces']}｜"
                         f"重複檔名：{r['duplicates']}")
+                    total = r['dwg'] + r['dxf']
+                    self.v_result.set(f"✓ 成功：掃描完成\n檔案：{total}　DWG：{r['dwg']}　DXF：{r['dxf']}　資料夾：{r['folders']}")
+                    self._set_status("success", "掃描完成")
+                    self.v_progress.set(100)
                     self._log("INFO", self.v_scan.get())
+                    self._reveal(self.result_frame)
                 elif k == "scan_err":
+                    self.worker = None
+                    self._can_stop = False
+                    self._set_busy_ui(False)
                     self.v_scan.set("")
+                    self.v_result.set(f"✗ 失敗：掃描失敗\n錯誤：{m[1]}")
+                    self._set_status("failed", "掃描失敗")
                     messagebox.showerror("掃描失敗", m[1])
                 elif k == "versions_done":
                     _, csv_path, total, ok, unknown, invalid, dwt = m
-                    self.btn_versions.configure(state="normal")
+                    self.worker = None
+                    self._can_stop = False
+                    self._set_busy_ui(False)
                     self.v_scan.set(
                         f"版本表完成：{total} 檔（DWT {dwt}）｜已辨識：{ok}｜未知代碼：{unknown}｜異常：{invalid}")
+                    state = "warning" if unknown or invalid else "success"
+                    self.v_result.set(
+                        f"{STATE[state]['symbol']} {STATE[state]['label']}：版本表完成\n"
+                        f"檔案：{total}　已辨識：{ok}　未知代碼：{unknown}　異常：{invalid}　DWT：{dwt}")
+                    self._set_status(state, "版本表完成")
+                    self.v_progress.set(100)
                     self._log("OK", f"DWG/DWT 版本表已輸出：{csv_path}")
                     self._refresh_analysis_outputs()
+                    self._reveal(self.result_frame)
                 elif k == "versions_err":
-                    self.btn_versions.configure(state="normal")
+                    self.worker = None
+                    self._can_stop = False
+                    self._set_busy_ui(False)
                     self.v_scan.set("")
+                    self.v_result.set(f"✗ 失敗：版本表失敗\n錯誤：{m[1]}")
+                    self._set_status("failed", "版本表失敗")
                     self._log("ERROR", f"DWG/DWT 版本表失敗：{m[1]}")
                     messagebox.showerror("版本表失敗", m[1])
         except queue.Empty:
