@@ -16,6 +16,8 @@ import common  # noqa: E402
 import env_check  # noqa: E402
 import pipeline  # noqa: E402
 import dwg_version  # noqa: E402
+import fontfix  # noqa: E402
+import fontfix_batch  # noqa: E402
 
 try:  # crisp text on high-DPI Windows displays
     import ctypes
@@ -48,6 +50,7 @@ LOG_FG = {"success": "#1B6E2C", "warning": "#8A5A00", "failed": "#B3261E"}      
 
 PRIMARY_RESULTS = {
     "version": ("csv/dwg_versions.csv",),
+    "fontfix": ("logs/fontfix_results.csv",),
     "dwg": ("csv/scada_hits.csv", "csv/file_index.csv"),
     "analysis": ("cross_reference/cross_reference.csv", "database/project.db"),
 }
@@ -231,11 +234,12 @@ class App:
         radio_row = ttk.Frame(selector)
         radio_row.pack(fill="x", padx=6, pady=6)
         self.mode_buttons = []
-        for value, text in (("scan", "掃描資料夾"), ("version", "DWG / DWT 版本表"),
-                            ("dwg", "DWG 轉 DXF + 解析"), ("analysis", "工程資料分析")):
+        modes = (("scan", "掃描資料夾"), ("version", "DWG / DWT 版本表"), ("fontfix", "缺字體修復"),
+                 ("dwg", "DWG 轉 DXF + 解析"), ("analysis", "工程資料分析"))
+        for i, (value, text) in enumerate(modes):
             radio = ttk.Radiobutton(radio_row, text=text, value=value, variable=self.v_mode,
                                     command=self._refresh_mode_ui)
-            radio.pack(side="left", padx=(0, 18))
+            radio.grid(row=i // 3, column=i % 3, sticky="w", padx=(0, 18), pady=2)
             self.mode_buttons.append(radio)
 
         # ---- 3 本工作設定 ----
@@ -307,6 +311,45 @@ class App:
         self.btn_analysis = ttk.Button(analysis, text="開始資料分析", command=self._start_analysis)
         self.btn_analysis.pack(anchor="w", pady=(6, 0))
 
+        fontfix_box = ttk.Frame(self.mode_frame)
+        self.mode_frames["fontfix"] = fontfix_box
+        ttk.Label(fontfix_box, text="缺字體修復",
+                  font=(tkfont.nametofont("TkDefaultFont").actual("family"), 11)).pack(anchor="w")
+        ttk.Label(
+            fontfix_box,
+            text=("使用上方的輸入資料夾與輸出資料夾。每個 DWG 會複製到輸出資料夾，"
+                  "只替換找不到的文字樣式字體；已安裝的字體與 @ 開頭的直排字體保持原樣。\n"
+                  "不會修改原始圖檔。正在 AutoCAD 中開啟的圖也會先複製再處理。"),
+            justify="left", wraplength=760,
+        ).pack(anchor="w", pady=(2, 6))
+        ttk.Checkbutton(fontfix_box, text="包含子資料夾（輸出保留相同的資料夾結構）",
+                        variable=self.opts["recursive"]).pack(anchor="w")
+        self.v_ff_overwrite = tk.BooleanVar(value=False)
+        ttk.Checkbutton(fontfix_box, text="覆寫既有的輸出 DWG",
+                        variable=self.v_ff_overwrite).pack(anchor="w")
+        form = ttk.Frame(fontfix_box)
+        form.pack(fill="x", pady=(6, 0))
+        self.v_ff_primary = tk.StringVar(value=fontfix.DEFAULT_PRIMARY)
+        self.v_ff_big = tk.StringVar(value=fontfix.DEFAULT_BIG)
+        ttk.Label(form, text="預設主字體", width=12).grid(row=0, column=0, sticky="w", pady=2)
+        ttk.Entry(form, textvariable=self.v_ff_primary, width=24).grid(row=0, column=1, sticky="w", pady=2)
+        ttk.Label(form, text="預設大字體", width=12).grid(row=1, column=0, sticky="w", pady=2)
+        ttk.Entry(form, textvariable=self.v_ff_big, width=24).grid(row=1, column=1, sticky="w", pady=2)
+        ttk.Label(form, text="另存版本", width=12).grid(row=2, column=0, sticky="w", pady=2)
+        self.ff_version_box = ttk.Combobox(
+            form, state="readonly", width=22,
+            values=[label for _code, label in fontfix.DWG_SAVE_VERSIONS])
+        self.ff_version_box.grid(row=2, column=1, sticky="w", pady=2)
+        self.ff_version_box.current(0)
+        form.columnconfigure(1, weight=1)
+        ttk.Label(fontfix_box, text="字體對照（選填，每行 舊字體=新字體）").pack(anchor="w", pady=(8, 2))
+        self.ff_map_text = tk.Text(fontfix_box, height=3, width=40, font=("Consolas", 10))
+        self.ff_map_text.pack(fill="x", pady=(0, 4))
+        self.ff_map_text.bind("<Tab>", lambda e: (e.widget.tk_focusNext().focus_set(), "break")[1])
+        self.ff_map_text.bind("<Shift-Tab>", lambda e: (e.widget.tk_focusPrev().focus_set(), "break")[1])
+        self.btn_fontfix = ttk.Button(fontfix_box, text="開始修復字體", command=self._start_fontfix)
+        self.btn_fontfix.pack(anchor="w", pady=(4, 0))
+
         # ---- 4 執行狀態 ----
         st = ttk.LabelFrame(main, text="④ 執行狀態")
         st.pack(fill="both", expand=True, **pad)
@@ -359,6 +402,8 @@ class App:
         self.more_results = ttk.Frame(rf)
         groups = (
             ("共用", (("開啟 errors.log", "logs/errors.log"), ("開啟 dwg_versions.csv", "csv/dwg_versions.csv"))),
+            ("缺字體修復", (("開啟 fontfix_results.csv", "logs/fontfix_results.csv"),
+                       ("開啟 fontfix.log", "logs/fontfix.log"))),
             ("DWG 結果", (("開啟 scada_hits.csv", "csv/scada_hits.csv"), ("開啟 object_hits.csv", "csv/object_hits.csv"),
                          ("開啟 file_index.csv", "csv/file_index.csv"))),
             ("工程分析結果", (("開啟 project.db", "database/project.db"),
@@ -464,10 +509,11 @@ class App:
         """Centralised enable/disable policy for all job controls."""
         state = "disabled" if busy else "normal"
         for widget in (self.mode_buttons + self.browse_buttons +
-                       [self.btn_scan, self.btn_versions, self.btn_analysis,
+                       [self.btn_scan, self.btn_versions, self.btn_analysis, self.btn_fontfix,
                         self.btn_files, self.btn_folder, self.btn_recheck, self.btn_save_config]):
             widget.configure(state=state)
         self.btn_start.configure(state="normal" if not busy and self.env_ok else "disabled")
+        self.btn_fontfix.configure(state="normal" if not busy and self.env_ok else "disabled")
         cancellable = busy and self._can_stop
         self.btn_stop.configure(state="normal" if cancellable else "disabled")
         self._refresh_analysis_outputs()
@@ -731,6 +777,100 @@ class App:
         self.worker.start()
         self._set_busy_ui(True)
 
+    def _fontfix_version(self):
+        label = self.ff_version_box.get()
+        for code, text in fontfix.DWG_SAVE_VERSIONS:
+            if text == label:
+                return code
+        return None
+
+    def _start_fontfix(self):
+        if self._busy():
+            return
+        if not self.env_ok:
+            messagebox.showerror("無法修復字體", "找不到可用的 accoreconsole；請先完成環境設定並重新檢查。")
+            return
+        src = self.v_in.get().strip()
+        dst = self.v_out.get().strip()
+        problem = fontfix.directory_problem(src, dst)
+        if problem:
+            messagebox.showerror("路徑錯誤", problem)
+            return
+        version = self._fontfix_version()
+        if version is None:
+            messagebox.showerror("版本錯誤", "不支援的 DWG 版本。")
+            return
+        primary = self.v_ff_primary.get().strip() or fontfix.DEFAULT_PRIMARY
+        big = self.v_ff_big.get().strip() or fontfix.DEFAULT_BIG
+        mapping = fontfix.parse_mapping(self.ff_map_text.get("1.0", "end"))
+        recursive = self.opts["recursive"].get()
+        overwrite = self.v_ff_overwrite.get()
+        timeout = int(self.cfg.get("timeout_seconds", 300))
+        accore = self.cfg.get("accoreconsole", "")
+        self.stop_event.clear()
+        self._can_stop = True
+        self.summary = None
+        self.v_progress.set(0)
+        self.v_ptext.set("")
+        self.v_current.set("")
+        self.v_result.set("修復字體中...")
+        self._set_status("running", "缺字體修復中…")
+
+        def work():
+            try:
+                result = fontfix_batch.run(
+                    src, dst, accore, recursive=recursive, primary=primary, big=big,
+                    mapping=mapping, version=version, overwrite=overwrite, timeout=timeout,
+                    stop_event=self.stop_event,
+                    progress=lambda i, n, cur: self.q.put(("progress", "缺字體修復", i, n, cur)),
+                    log=lambda level, message: self.q.put(("log", level, message)),
+                )
+            except Exception as exc:  # noqa: BLE001
+                result = dict(dwg=0, ok=0, failed=0, skipped=0, warnings=0, styles_replaced=0,
+                              stopped=False, fatal=f"{type(exc).__name__}: {exc}",
+                              failed_files=[], still_files=[], elapsed=0)
+                common.log_error({"output_dir": dst}, f"fontfix crashed: {result['fatal']}")
+            self.q.put(("fontfix_done", result))
+
+        self.worker = threading.Thread(target=work, daemon=True)
+        self.worker.start()
+        self._set_busy_ui(True)
+
+    def _on_fontfix_done(self, result):
+        self.summary = result
+        self.worker = None
+        self._can_stop = False
+        self._set_busy_ui(False)
+        if result.get("dwg", 0) == 0 and not result.get("fatal") and not result.get("stopped"):
+            state, verdict = "warning", "沒有找到 DWG"
+        else:
+            state, verdict = classify_outcome(result)
+        failed_files = result.get("failed_files", [])
+        shown = "\n".join(f"  - {friendly_failure(x)}" for x in failed_files[:8])
+        if len(failed_files) > 8:
+            shown += f"\n  ... 另有 {len(failed_files) - 8} 個（見 errors.log）"
+        still = result.get("still_files") or []
+        still_shown = "\n".join(f"  - {item}" for item in still[:8])
+        if len(still) > 8:
+            still_shown += f"\n  ... 另有 {len(still) - 8} 個"
+        st = STATE[state]
+        self.v_result.set(
+            f"{st['symbol']} {st['label']}：{verdict}\n"
+            f"DWG：{result.get('dwg', 0)}　成功：{result.get('ok', 0)}　"
+            f"失敗：{result.get('failed', 0)}　略過：{result.get('skipped', 0)}\n"
+            f"替換樣式：{result.get('styles_replaced', 0)}　"
+            f"存檔後仍缺字：{result.get('warnings', 0)}\n"
+            f"結果：logs/fontfix_results.csv"
+            + (f"\n錯誤：{result['fatal']}" if result.get("fatal") else "")
+            + (f"\n\n失敗檔案：\n{shown}" if failed_files else "")
+            + (f"\n\n仍缺字：\n{still_shown}" if still else "")
+        )
+        self._set_status(state, verdict)
+        if not result.get("fatal") and not result.get("stopped"):
+            self.v_progress.set(100)
+        self._refresh_analysis_outputs()
+        self._reveal(self.result_frame)
+
     # ---------- run ----------
     def _busy(self):
         return self.worker is not None and self.worker.is_alive()
@@ -821,6 +961,8 @@ class App:
                     self._on_done(m[1])
                 elif k == 'analysis_done':
                     self._analysis_done(m[1])
+                elif k == "fontfix_done":
+                    self._on_fontfix_done(m[1])
                 elif k == "env_paths":
                     self._on_env_paths(m[1], m[2])
                 elif k == "env":
