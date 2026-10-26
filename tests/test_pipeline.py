@@ -120,6 +120,23 @@ def test_14_keyword_search(sample_dxf):
     assert find_scada.scada_rules.match_keyword("rtu panel", "RTU")
 
 
+def test_loaded_doc_can_be_reused_for_analysis_and_search(monkeypatch):
+    doc = ezdxf.new()
+    doc.layers.add("SCADA")
+    doc.modelspace().add_text("RTU-01", dxfattribs={"layer": "SCADA"})
+    rules = find_scada.scada_rules.build_rules(CFG)
+
+    monkeypatch.setattr(analyze_dxf.ezdxf, "readfile", lambda *_args, **_kwargs: pytest.fail(
+        "analyze_doc must not reload an already parsed DXF"))
+    rows, info = analyze_dxf.analyze_doc(doc, "memory.dxf")
+    hits, excluded = find_scada.search_doc(doc, "memory.dxf", rules)
+
+    assert info["text_count"] == 1
+    assert rows["texts"][0]["text"] == "RTU-01"
+    assert any(row["keyword"] == "RTU" for row in hits)
+    assert not excluded
+
+
 @pytest.mark.accore
 def test_15_batch_continues_after_failure(cfg):
     inp = Path(cfg["input_dir"])
