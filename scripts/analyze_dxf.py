@@ -76,8 +76,8 @@ def mtext_plain(e):
     return decode_dxf_unicode(text)
 
 
-def analyze(dxf_path, rel_name):
-    doc = ezdxf.readfile(str(dxf_path))
+def analyze_doc(doc, rel_name):
+    """Analyze an already loaded DXF document."""
     res = dict(layers=[], texts=[], blocks=[], dimensions=[], attribs=[], entity_types=Counter())
     layer_count = Counter()
     for layout in iter_layouts(doc):
@@ -137,6 +137,11 @@ def analyze(dxf_path, rel_name):
     return res, info
 
 
+def analyze(dxf_path, rel_name):
+    """Load and analyze one DXF file."""
+    return analyze_doc(ezdxf.readfile(str(dxf_path)), rel_name)
+
+
 def write_csv(path, rows, fields):
     with open(path, "w", newline="", encoding="utf-8-sig") as f:
         w = csv.DictWriter(f, fields, extrasaction="ignore")
@@ -144,7 +149,8 @@ def write_csv(path, rows, fields):
         w.writerows(rows)
 
 
-def run(cfg, write_csv_files=True, write_json_files=True, log=None, progress=None, stop_event=None):
+def run(cfg, write_csv_files=True, write_json_files=True, log=None, progress=None, stop_event=None,
+        files=None, document_callback=None):
     """Analyze every DXF under output/dxf. Returns dict(total, ok, failed, stopped)."""
     log = log or (lambda level, msg: print(f"[{level}] {msg}"))
     progress = progress or (lambda i, n, cur: None)
@@ -153,7 +159,7 @@ def run(cfg, write_csv_files=True, write_json_files=True, log=None, progress=Non
     (out / "csv").mkdir(parents=True, exist_ok=True)
     (out / "json").mkdir(parents=True, exist_ok=True)
     idx, layers, texts, blocks, dims, attribs = [], [], [], [], [], []
-    files = sorted(dxf_root.rglob("*.dxf"))
+    files = sorted(Path(p) for p in files) if files is not None else sorted(dxf_root.rglob("*.dxf"))
     rules = scada_rules.build_rules(cfg)
     stats = dict(total=len(files), ok=0, failed=0, stopped=False, suspect=0, failed_files=[])
     for n, p in enumerate(files, 1):
@@ -166,7 +172,10 @@ def run(cfg, write_csv_files=True, write_json_files=True, log=None, progress=Non
         row = dict(source_file=src, dxf_file=str(p), dxf_version="", entity_count=0, layer_count=0,
                    block_count=0, text_count=0, status="")
         try:
-            res, info = analyze(p, rel)
+            doc = ezdxf.readfile(str(p))
+            res, info = analyze_doc(doc, rel)
+            if document_callback is not None:
+                document_callback(doc, rel)
             row.update(info, status="OK")
             layers += res["layers"]
             texts += res["texts"]
