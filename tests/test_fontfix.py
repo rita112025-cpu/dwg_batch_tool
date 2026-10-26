@@ -187,7 +187,7 @@ def test_generated_lisp_is_utf8_and_does_not_use_or_as_a_value():
     )
     assert script.isascii()
     assert "_.QSAVE" in script and "_.SAVEAS" not in script
-    assert "FONTFIX_ERROR\t" not in script          # a real tab would be parsed from the echo
+    assert "\\t" not in script          # markers use "|"; a tab escape would be turned into spaces by the console
     assert "FONTALT" in script and "txt.shx" in script
     versioned = fontfix.build_script(
         [{"spath": "C:/temp/in_abc.dwg", "save_version": "2013", "save_path": "C:/temp/out_abc.dwg"}],
@@ -202,10 +202,10 @@ def test_parse_markers():
     text = (
         "FONTFIX_READY\n"
         "DWGBATCH_OPEN_0|in_abc.dwg|\n"
-        "FONTFIX_REPLACED\tACSE\tsino2.shx\tromans.shx\t\t\n"
-        "FONTFIX_REPLACED\tDIM\tromanc.shx\tromanc.shx\tgenie.shx\tchineset.shx\n"
-        "FONTFIX_STILL\tWeird\tmissing.shx\t\n"
-        "FONTFIX_SUMMARY\t2\t1\n"
+        "FONTFIX_REPLACED|ACSE|sino2.shx|romans.shx||\n"
+        "FONTFIX_REPLACED|DIM|romanc.shx|romanc.shx|genie.shx|chineset.shx\n"
+        "FONTFIX_STILL|Weird|missing.shx|\n"
+        "FONTFIX_SUMMARY|2|1\n"
         "DWGBATCH_DONE_0_\n"
     )
     parsed = fontfix.parse_fontfix_output(text)

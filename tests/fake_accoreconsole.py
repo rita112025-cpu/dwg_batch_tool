@@ -40,8 +40,8 @@ def _messages_for(script_text: str) -> list[str]:
                 messages.append("invalid drawing")
                 messages.append("*" * 30)
                 break
-            messages.append("FONTFIX_REPLACED\tStandard\tmissing.shx\tromans.shx\t\t")
-            messages.append("FONTFIX_SUMMARY\t1\t0")
+            messages.append("FONTFIX_REPLACED|Standard|missing.shx|romans.shx||")
+            messages.append("FONTFIX_SUMMARY|1|0")
         elif upper in {"_.QSAVE", "_QSAVE"} and pending and Path(pending).is_file():
             path = Path(pending)
             path.write_bytes(path.read_bytes())

@@ -161,7 +161,7 @@ def test_full_pipeline_chinese_paths_and_error_isolation(env):
     assert (out / "logs" / "gui.log").exists() and (out / "logs" / "errors.log").exists()
     assert any(l == "ERROR" and "bad.dwg" in m for l, m in logs)
     assert any(l == "INFO" and "continue" in m for l, m in logs)   # batch went on after failure
-    assert prog and prog[-1][0] == "SCADA"
+    assert prog and prog[-1][0] == "Analyze + SCADA"   # analysis and search share one stage since the refactor
     assert all(sha(p) == h for p, h in hashes.items())              # originals untouched
     with open(out / "csv" / "scada_hits.csv", encoding="utf-8-sig") as f:
         assert len(list(csv.DictReader(f))) == s["keyword_hits"]
