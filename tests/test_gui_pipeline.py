@@ -50,7 +50,7 @@ def test_mode_defaults_and_environment_gating(monkeypatch, tk_root):
     assert a.log_frame.winfo_manager()
     original_convert = a.opts["convert"].get()
     original_keywords = a._keywords()
-    for mode in ("scan", "analysis", "version", "fontfix", "textextract", "textreplace", "dwg"):
+    for mode in ("scan", "analysis", "version", "fontfix", "layerclass", "textextract", "textreplace", "dwg"):
         a.v_mode.set(mode)
         a._refresh_mode_ui()
         assert a.mode_frames[mode].winfo_manager()
@@ -102,6 +102,9 @@ def test_primary_result_selection(tmp_path):
     changes = out / "logs" / "textreplace_changes.csv"
     changes.touch()
     assert appmod.get_primary_result("textreplace", out) == changes
+    moves = out / "logs" / "layerclass_moves.csv"
+    moves.touch()
+    assert appmod.get_primary_result("layerclass", out) == moves
 
     project_db = out / "database" / "project.db"
     project_db.touch()

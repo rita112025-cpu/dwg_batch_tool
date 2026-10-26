@@ -14,6 +14,17 @@ import sys
 from pathlib import Path
 
 CRASH = b"FONTFIX_TEST_CRASH"
+EMPTY = b"LAYER_TEST_EMPTY"
+
+_LAYER_DUMP = [
+    "LAYERROW|=|PL|=|1|=|LWPOLYLINE|=|4|=|0|=|1",
+    "LAYERROW|=|TST|=|2|=|TEXT|=|2|=|0|=|1",
+    "LAYERROW|=|H|=|3|=|HATCH|=|1|=|0|=|1",
+    "LAYERROW|=|TITLE|=|4|=|INSERT|=|1|=|0|=|1",
+    "LAYERLOCK|=|DEFPOINTS|=|skipped",
+    "LAYERSUMMARY|=|8|=|4|=|1",
+    "LAYERCLASS_READY",
+]
 
 # Fixed dump the text-mode tests match against. The MTEXT body is the wire
 # form of {\H2.5;W12 400x200} (one backslash stored as two).
@@ -31,7 +42,8 @@ def _messages_for(script_text: str) -> list[str]:
     lines = script_text.splitlines()
     text_dump = "tx-dump-current" in script_text
     text_apply = "tx-apply-" in script_text
-    messages = [] if text_dump or text_apply else ["FONTFIX_READY"]
+    layer_mode = "lc-run" in script_text
+    messages = [] if text_dump or text_apply or layer_mode else ["FONTFIX_READY"]
     pending = ""
     index = 0
     while index < len(lines):
@@ -58,6 +70,12 @@ def _messages_for(script_text: str) -> list[str]:
             elif text_apply:
                 messages.append("TEXTAPPLY|=|AB1|=|ok")
                 messages.append("TEXTAPPLY_SUMMARY|=|1|=|0")
+            elif layer_mode:
+                if EMPTY in payload:
+                    messages.append("LAYERSUMMARY|=|0|=|0|=|0")
+                    messages.append("LAYERCLASS_READY")
+                else:
+                    messages.extend(_LAYER_DUMP)
             else:
                 sep = "|=|"
                 messages.append(f"FONTFIX_REPLACED{sep}Standard{sep}missing.shx{sep}romans.shx{sep}{sep}")
@@ -67,6 +85,8 @@ def _messages_for(script_text: str) -> list[str]:
             data = path.read_bytes()
             if text_apply and b"\nTEXTAPPLIED" not in data:
                 data += b"\nTEXTAPPLIED"
+            if layer_mode and b"\nLAYERAPPLIED" not in data:
+                data += b"\nLAYERAPPLIED"
             path.write_bytes(data)
         elif upper in {"_.SAVEAS", "_SAVEAS"} and index + 2 < len(lines):
             target = lines[index + 2].strip().strip('"')
