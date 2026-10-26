@@ -14,11 +14,23 @@ import sys
 from pathlib import Path
 
 CRASH = b"FONTFIX_TEST_CRASH"
+EMPTY = b"LAYER_TEST_EMPTY"
+
+_LAYER_DUMP = [
+    "LAYERROW|=|PL|=|1|=|LWPOLYLINE|=|4|=|0|=|1",
+    "LAYERROW|=|TST|=|2|=|TEXT|=|2|=|0|=|1",
+    "LAYERROW|=|H|=|3|=|HATCH|=|1|=|0|=|1",
+    "LAYERROW|=|TITLE|=|4|=|INSERT|=|1|=|0|=|1",
+    "LAYERLOCK|=|DEFPOINTS|=|skipped",
+    "LAYERSUMMARY|=|8|=|4|=|1",
+    "LAYERCLASS_READY",
+]
 
 
 def _messages_for(script_text: str) -> list[str]:
     lines = script_text.splitlines()
-    messages = ["FONTFIX_READY"]
+    layer_mode = "lc-run" in script_text
+    messages = [] if layer_mode else ["FONTFIX_READY"]
     pending = ""
     index = 0
     while index < len(lines):
@@ -40,12 +52,22 @@ def _messages_for(script_text: str) -> list[str]:
                 messages.append("invalid drawing")
                 messages.append("*" * 30)
                 break
-            sep = "|=|"
-            messages.append(f"FONTFIX_REPLACED{sep}Standard{sep}missing.shx{sep}romans.shx{sep}{sep}")
-            messages.append(f"FONTFIX_SUMMARY{sep}1{sep}0")
+            if layer_mode:
+                if EMPTY in payload:
+                    messages.append("LAYERSUMMARY|=|0|=|0|=|0")
+                    messages.append("LAYERCLASS_READY")
+                else:
+                    messages.extend(_LAYER_DUMP)
+            else:
+                sep = "|=|"
+                messages.append(f"FONTFIX_REPLACED{sep}Standard{sep}missing.shx{sep}romans.shx{sep}{sep}")
+                messages.append(f"FONTFIX_SUMMARY{sep}1{sep}0")
         elif upper in {"_.QSAVE", "_QSAVE"} and pending and Path(pending).is_file():
             path = Path(pending)
-            path.write_bytes(path.read_bytes())
+            data = path.read_bytes()
+            if layer_mode and b"\nLAYERAPPLIED" not in data:
+                data += b"\nLAYERAPPLIED"
+            path.write_bytes(data)
         elif upper in {"_.SAVEAS", "_SAVEAS"} and index + 2 < len(lines):
             target = lines[index + 2].strip().strip('"')
             if pending and Path(pending).is_file():
