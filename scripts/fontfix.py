@@ -20,6 +20,10 @@ typeface names are collected in Python (``winreg``) and embedded in the UTF-8 LI
 because that check has to be right even when ``vl-registry-*`` is unavailable.
 ``findfile`` and the Windows Fonts folders are still evaluated inside AutoCAD, where
 the support path exists.
+
+Result lines are separated with ``|=|``. accoreconsole's processed stdout expands a
+princ tab into an irregular run of spaces and drops empty fields, which made a
+tab parser report "no result" and skip publishing the saved drawing.
 """
 from __future__ import annotations
 
@@ -28,6 +32,10 @@ import sys
 from pathlib import Path
 
 TTF_EXTENSIONS = (".ttf", ".ttc", ".otf")
+
+# A single "|" is a legal xref style name (XREF|STYLE). Tabs do not survive
+# accoreconsole processed stdout, so the marker fields use this instead.
+MARKER_SEP = "|=|"
 
 # SAVEAS format keywords. Empty keeps the current format via QSAVE.
 # These are command-line keywords, not the numeric AcSaveAsType codes the
@@ -369,6 +377,7 @@ def build_lisp(primary, big, mapping, typefaces, font_dirs):
 (setq *ff-map* {map_literal})
 (setq *ff-faces* {face_literal})
 (setq *ff-dirs* {dir_literal})
+(setq *ff-sep* {lisp_str(MARKER_SEP)})
 
 (defun ff-str (v)
   (if (= (type v) 'STR) v ""))
@@ -474,13 +483,24 @@ def build_lisp(primary, big, mapping, typefaces, font_dirs):
     (setq rec (tblnext "STYLE")))
   names)
 
-(defun ff-clean (s / i n ch out)
-  (setq s (ff-str s) i 1 n (strlen s) out "")
+(defun ff-clean (s / i n sep slen ch out)
+  (setq s (ff-str s)
+        sep *ff-sep*
+        slen (strlen sep)
+        i 1
+        n (strlen s)
+        out "")
   (while (<= i n)
     (setq ch (substr s i 1))
-    (if (or (= ch "|") (= ch (chr 9)) (= ch (chr 10)) (= ch (chr 13)))
-      (setq out (strcat out " "))
-      (setq out (strcat out ch)))
+    (cond
+      ((or (= ch (chr 9)) (= ch (chr 10)) (= ch (chr 13)))
+        (setq out (strcat out " ")))
+      ((and (> slen 0)
+            (<= (+ i slen -1) n)
+            (= (substr s i slen) sep))
+        (setq out (strcat out "|"))
+        (setq i (+ i slen -1)))
+      (T (setq out (strcat out ch))))
     (setq i (1+ i)))
   out)
 
@@ -512,9 +532,9 @@ def build_lisp(primary, big, mapping, typefaces, font_dirs):
     (progn
       (setq ok (entmod ned))
       (if ok
-        (ff-emit (strcat "FONTFIX_REPLACED|" name "|" (ff-clean pf) "|" (ff-clean newpf)
-                         "|" (ff-clean bf) "|" (ff-clean newbf)))
-        (ff-emit (strcat "FONTFIX_ERROR|" name " entmod failed")))))
+        (ff-emit (strcat "FONTFIX_REPLACED{MARKER_SEP}" name "{MARKER_SEP}" (ff-clean pf) "{MARKER_SEP}" (ff-clean newpf)
+                         "{MARKER_SEP}" (ff-clean bf) "{MARKER_SEP}" (ff-clean newbf)))
+        (ff-emit (strcat "FONTFIX_ERROR{MARKER_SEP}" name " entmod failed")))))
   (if ok T nil))
 
 (defun ff-verify (/ rec en ed name pf bf n)
@@ -528,7 +548,7 @@ def build_lisp(primary, big, mapping, typefaces, font_dirs):
     (if (or (ff-missing-p pf) (ff-missing-p bf))
       (progn
         (setq n (1+ n))
-        (ff-emit (strcat "FONTFIX_STILL|" name "|" (ff-clean pf) "|" (ff-clean bf)))))
+        (ff-emit (strcat "FONTFIX_STILL{MARKER_SEP}" name "{MARKER_SEP}" (ff-clean pf) "{MARKER_SEP}" (ff-clean bf)))))
     (setq rec (tblnext "STYLE")))
   n)
 
@@ -537,14 +557,14 @@ def build_lisp(primary, big, mapping, typefaces, font_dirs):
         names (ff-collect)
         n 0)
   (defun *error* (msg)
-    (ff-emit (strcat "FONTFIX_ERROR|" (ff-clean msg)))
-    (ff-emit "FONTFIX_SUMMARY|0|0")
+    (ff-emit (strcat "FONTFIX_ERROR{MARKER_SEP}" (ff-clean msg)))
+    (ff-emit "FONTFIX_SUMMARY{MARKER_SEP}0{MARKER_SEP}0")
     (setq *error* olderr)
     (princ))
   (foreach en names
     (if (ff-fix-one en) (setq n (1+ n))))
   (setq still (ff-verify))
-  (ff-emit (strcat "FONTFIX_SUMMARY|" (itoa n) "|" (itoa still)))
+  (ff-emit (strcat "FONTFIX_SUMMARY{MARKER_SEP}" (itoa n) "{MARKER_SEP}" (itoa still)))
   (setq *error* olderr)
   (princ))
 
@@ -606,7 +626,7 @@ def build_script(jobs, lisp_path):
         )
         lines.append(
             '(if (and (boundp \'ff-fix-current) ff-fix-current) '
-            '(ff-fix-current) (princ (strcat "\\nFONTFIX_" "ERROR|lisp not loaded\\n")))'
+            f'(ff-fix-current) (princ (strcat "\\nFONTFIX_" "ERROR{MARKER_SEP}lisp not loaded\\n")))'
         )
         if job.get("save_version"):
             lines.append("_.SAVEAS")
@@ -621,42 +641,95 @@ def build_script(jobs, lisp_path):
     return text
 
 
-# Fields are separated by "|": accoreconsole's console turns a tab into spaces, so tabs cannot be parsed.
-_REPLACED = __import__("re").compile(
-    r"FONTFIX_REPLACED\|([^|\r\n]*)\|([^|\r\n]*)\|([^|\r\n]*)\|([^|\r\n]*)\|([^|\r\n]*)"
-)
-_STILL = __import__("re").compile(r"FONTFIX_STILL\|([^|\r\n]*)\|([^|\r\n]*)\|([^|\r\n]*)")
-_SUMMARY = __import__("re").compile(r"FONTFIX_SUMMARY\|(\d+)\|(\d+)")
-_ERROR = __import__("re").compile(r"FONTFIX_ERROR\|([^\r\n]*)")
-_READY = __import__("re").compile(r"FONTFIX_READY")
+def _marker_rests(text, keyword):
+    """Payloads of lines that start with ``keyword``.
+
+    The script echoes ``FONTFIX_`` and ``ERROR`` as two strings, so a command
+    echo never starts with the full keyword.
+    """
+    rests = []
+    for raw in (text or "").splitlines():
+        line = raw.strip()
+        if not line.startswith(keyword):
+            continue
+        rest = line[len(keyword):]
+        if rest == "" or rest[0] in " \t|" or rest.startswith(MARKER_SEP):
+            rests.append(rest)
+    return rests
+
+
+def _split_fields(rest, count, *, single=False):
+    """Split one marker payload into ``count`` fields.
+
+    ``|=|`` is what the LISP prints. A leading ``|`` is the previous generator
+    (it cannot carry an xref style name, which itself contains ``|``). A tab is
+    older still. A run of spaces is accoreconsole processed stdout: a princ tab
+    is expanded and empty fields disappear, so only trailing empties can be
+    recovered from that form.
+    """
+    if rest.startswith(MARKER_SEP) or MARKER_SEP in rest:
+        parts = rest.split(MARKER_SEP)
+        if parts and parts[0] == "":
+            parts = parts[1:]
+    elif "\t" in rest:
+        parts = rest.split("\t")
+        if parts and parts[0] == "":
+            parts = parts[1:]
+    elif rest.startswith("|"):
+        if single:
+            parts = [rest[1:]]
+        else:
+            parts = rest.split("|")
+            if parts and parts[0] == "":
+                parts = parts[1:]
+    elif single:
+        parts = [rest.strip()] if rest.strip() else []
+    else:
+        parts = rest.split()
+    if len(parts) < count:
+        parts.extend([""] * (count - len(parts)))
+    return [part.strip() for part in parts[:count]]
+
+
+def _summary_pair(rest):
+    replaced, still = _split_fields(rest, 2)
+    if not replaced.isdigit() or not still.isdigit():
+        return None
+    return int(replaced), int(still)
 
 
 def parse_fontfix_output(text):
     """Parse LISP markers from one drawing's console output."""
     replacements = []
-    for match in _REPLACED.finditer(text or ""):
+    for rest in _marker_rests(text, "FONTFIX_REPLACED"):
+        style, old_p, new_p, old_b, new_b = _split_fields(rest, 5)
         replacements.append({
-            "style": match.group(1),
-            "old_primary": match.group(2),
-            "new_primary": match.group(3),
-            "old_big": match.group(4),
-            "new_big": match.group(5),
+            "style": style,
+            "old_primary": old_p,
+            "new_primary": new_p,
+            "old_big": old_b,
+            "new_big": new_b,
         })
     still = []
-    for match in _STILL.finditer(text or ""):
-        still.append({"style": match.group(1), "primary": match.group(2), "big": match.group(3)})
+    for rest in _marker_rests(text, "FONTFIX_STILL"):
+        style, primary, big = _split_fields(rest, 3)
+        still.append({"style": style, "primary": primary, "big": big})
     summary = None
-    found = list(_SUMMARY.finditer(text or ""))
+    found = [pair for pair in (_summary_pair(rest) for rest in _marker_rests(text, "FONTFIX_SUMMARY")) if pair]
     if found:
-        last = found[-1]
-        summary = (int(last.group(1)), int(last.group(2)))
-    errors = [match.group(1).strip() for match in _ERROR.finditer(text or "")]
+        summary = found[-1]
+    errors = []
+    for rest in _marker_rests(text, "FONTFIX_ERROR"):
+        message = _split_fields(rest, 1, single=True)[0]
+        if message:
+            errors.append(message)
+    ready = any(raw.strip() == "FONTFIX_READY" for raw in (text or "").splitlines())
     return {
         "replacements": replacements,
         "still_missing": still,
         "summary": summary,
         "errors": errors,
-        "ready": bool(_READY.search(text or "")),
+        "ready": ready,
     }
 
 
