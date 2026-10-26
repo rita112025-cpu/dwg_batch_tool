@@ -95,10 +95,16 @@ def _run_launch(jobs, accore, lisp_path, timeout, stop_event, on_file_start, log
     last_progress = time.time()
     fail_msg, stopped = "", False
     scan_from = 0
+    seen_chars = 0
     try:
         while consumed < len(jobs):
             time.sleep(0.2)
             text = _decode(reader.buf)
+            if len(text) != seen_chars:
+                # A large DWG keeps printing (block-index updates, enablers) for the
+                # whole QSAVE, and only then prints DONE. Silence is a stall.
+                last_progress = time.time()
+                seen_chars = len(text)
             for match in OPEN_RE.finditer(text):
                 index = int(match.group(1))
                 if index not in opened and index < len(jobs):

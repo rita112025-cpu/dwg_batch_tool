@@ -19,6 +19,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 import fontfix  # noqa: E402
 import fontfix_batch  # noqa: E402
 from common import decode_console, load_config  # noqa: E402  # decode_console used by the accore test
+from convert_batch import DONE_RE  # noqa: E402
 from convert_single import run_accore  # noqa: E402
 
 FAKE = Path(__file__).resolve().parent / "fake_accoreconsole.py"
@@ -187,7 +188,10 @@ def test_generated_lisp_is_utf8_and_does_not_use_or_as_a_value():
     )
     assert script.isascii()
     assert "_.QSAVE" in script and "_.SAVEAS" not in script
-    assert "FONTFIX_ERROR\t" not in script          # a real tab would be parsed from the echo
+    assert '*ff-sep* "|=|"' in text
+    assert "FONTFIX_REPLACED|=|" in text
+    assert "\\t" not in script
+    assert "FONTFIX_ERROR|=|" not in script         # the echo splits FONTFIX_ from ERROR
     assert "FONTALT" in script and "txt.shx" in script
     versioned = fontfix.build_script(
         [{"spath": "C:/temp/in_abc.dwg", "save_version": "2013", "save_path": "C:/temp/out_abc.dwg"}],
@@ -198,14 +202,21 @@ def test_generated_lisp_is_utf8_and_does_not_use_or_as_a_value():
     fontfix.script_bytes(script)
 
 
+def _rows(parsed):
+    return [
+        (row["style"], row["old_primary"], row["new_primary"], row["old_big"], row["new_big"])
+        for row in parsed["replacements"]
+    ]
+
+
 def test_parse_markers():
     text = (
         "FONTFIX_READY\n"
         "DWGBATCH_OPEN_0|in_abc.dwg|\n"
-        "FONTFIX_REPLACED\tACSE\tsino2.shx\tromans.shx\t\t\n"
-        "FONTFIX_REPLACED\tDIM\tromanc.shx\tromanc.shx\tgenie.shx\tchineset.shx\n"
-        "FONTFIX_STILL\tWeird\tmissing.shx\t\n"
-        "FONTFIX_SUMMARY\t2\t1\n"
+        "FONTFIX_REPLACED|ACSE|sino2.shx|romans.shx||\n"
+        "FONTFIX_REPLACED|DIM|romanc.shx|romanc.shx|genie.shx|chineset.shx\n"
+        "FONTFIX_STILL|Weird|missing.shx|\n"
+        "FONTFIX_SUMMARY|2|1\n"
         "DWGBATCH_DONE_0_\n"
     )
     parsed = fontfix.parse_fontfix_output(text)
@@ -216,6 +227,153 @@ def test_parse_markers():
     assert parsed["still_missing"][0]["style"] == "Weird"
     assert "ACSE | sino2.shx -> romans.shx" in fontfix.replacement_text(parsed["replacements"])
     assert "主=missing.shx" in fontfix.still_text(parsed["still_missing"])
+
+
+def test_parse_pipe_separator_keeps_spaces_and_empty_fields():
+    sep = fontfix.MARKER_SEP
+    text = (
+        "FONTFIX_READY\n"
+        f"FONTFIX_REPLACED{sep}微軟正黑體{sep}Microsoft JhengHei.ttf{sep}romans.shx{sep}{sep}\n"
+        f"FONTFIX_REPLACED{sep}XREF|ACSE{sep}sino2.shx{sep}romans.shx{sep}genie.shx{sep}chineset.shx\n"
+        f"FONTFIX_STILL{sep}Weird{sep}missing.shx{sep}\n"
+        f"FONTFIX_ERROR{sep}XREF|ACSE entmod failed\n"
+        f"FONTFIX_SUMMARY{sep}2{sep}1\n"
+    )
+    parsed = fontfix.parse_fontfix_output(text)
+    assert parsed["summary"] == (2, 1)
+    assert _rows(parsed)[0] == ("微軟正黑體", "Microsoft JhengHei.ttf", "romans.shx", "", "")
+    assert _rows(parsed)[1][0] == "XREF|ACSE"
+    assert parsed["still_missing"][0]["big"] == ""
+    assert parsed["errors"] == ["XREF|ACSE entmod failed"]
+
+
+def test_parse_spaces_when_console_expands_tabs():
+    """The shape accoreconsole actually wrote: spaces, empty trailing fields gone."""
+    text = (
+        "FONTFIX_REPLACED   ACSE   sino2.shx romans.shx\n"
+        "FONTFIX_REPLACED   DIM  romanc.shx       romanc.shx   genie.shx chineset.shx\n"
+        "FONTFIX_STILL   Weird  missing.shx\n"
+        "FONTFIX_ERROR   lisp not loaded\n"
+        "FONTFIX_SUMMARY  2     0\n"
+    )
+    parsed = fontfix.parse_fontfix_output(text)
+    assert parsed["summary"] == (2, 0)
+    assert _rows(parsed)[0] == ("ACSE", "sino2.shx", "romans.shx", "", "")
+    assert _rows(parsed)[1][4] == "chineset.shx"
+    assert parsed["still_missing"][0]["primary"] == "missing.shx"
+    assert parsed["errors"] == ["lisp not loaded"]
+
+
+# Captured from AutoCAD 2027 accoreconsole (processed stdout). Tabs are already gone.
+STDOUT_FIXTURE = ROOT / "tests" / "fixtures" / "fontfix_accore_stdout.log"
+
+# Field order is style, old primary, new primary, old big, new big.
+# Empty big-font fields were dropped by the console; the parser pads them back.
+_CAPTURED = [
+    [
+        ("DIM", "romanc.shx", "romanc.shx", "genie.shx", "chineset.shx"),
+        ("CDP40-05F-CSD(mitc)-20221228$0$Ascii", "ascii.shx", "romans.shx", "chinese.shx", "chineset.shx"),
+    ],
+    [
+        ("ACSE", "sino2.shx", "romans.shx", "", ""),
+        ("DIM", "romanc.shx", "romanc.shx", "genie.shx", "chineset.shx"),
+        ("S2H_161", "Sino2_6.shx", "romans.shx", "chineset.shx", "chineset.shx"),
+        ("S2", "SINO2.shx", "romans.shx", "", ""),
+        ("CDP40-05F-CSD(mitc)-20221228$0$Ascii", "ascii.shx", "romans.shx", "chinese.shx", "chineset.shx"),
+    ],
+    [
+        ("MITAC", "ctcichn0.shx", "romans.shx", "sino161.shx", "chineset.shx"),
+        ("LB01-04F-CSD(mitc)$0$Standard", "ascii.shx", "romans.shx", "chinese.shx", "chineset.shx"),
+        ("LB01-Sec$0$Standard", "ascii.shx", "romans.shx", "chinese.shx", "chineset.shx"),
+        ("LSP", "ascii-rei.shx", "romans.shx", "chinese.shx", "chineset.shx"),
+        ("Ascii", "ascii_c.shx", "romans.shx", "chinese.shx", "chineset.shx"),
+        ("ENG", "ASCII.shx", "romans.shx", "chineset.shx", "chineset.shx"),
+        ("Style-Sino2_6-Sino161", "Sino2_6.shx", "romans.shx", "", ""),
+        ("Style-msdefault", "msdefault.shx", "romans.shx", "", ""),
+        ("Style-Sino2-Sino161", "SINO2.shx", "romans.shx", "", ""),
+        ("Style-ks", "sino2.shx", "romans.shx", "", ""),
+        ("Style-SINO2-chineset", "SINO2.shx", "romans.shx", "chineset.shx", "chineset.shx"),
+        ("Style-Sino2", "SINO2.shx", "romans.shx", "", ""),
+        ("ACSE", "sino2.shx", "romans.shx", "", ""),
+        ("DIM", "romanc.shx", "romanc.shx", "genie.shx", "chineset.shx"),
+        ("S2H_161", "Sino2_6.shx", "romans.shx", "chineset.shx", "chineset.shx"),
+        ("S2", "SINO2.shx", "romans.shx", "", ""),
+        ("CDP40-05F-CSD(mitc)-20221228$0$Ascii", "ascii.shx", "romans.shx", "chinese.shx", "chineset.shx"),
+    ],
+]
+
+
+def _done_slices(text):
+    """Same DONE-marker rule as fontfix_batch._run_launch, including the quoted echo."""
+    slices = []
+    scan_from = 0
+    consumed = 0
+    for match in DONE_RE.finditer(text):
+        index = int(match.group(1))
+        if index == consumed:
+            slices.append(text[scan_from:match.end()])
+            consumed += 1
+            scan_from = match.end()
+    return slices
+
+
+def test_real_accoreconsole_stdout_parses_every_drawing():
+    text = STDOUT_FIXTURE.read_text(encoding="utf-8")
+    assert "\t" not in text
+    assert "FONTFIX_READY" in text
+    slices = _done_slices(text)
+    assert len(slices) == 3
+    summaries = []
+    for expected, console in zip(_CAPTURED, slices):
+        parsed = fontfix.parse_fontfix_output(console)
+        assert parsed["summary"] == (len(expected), 0)
+        assert _rows(parsed) == list(expected)
+        assert parsed["errors"] == []
+        summaries.append(parsed["summary"])
+    assert summaries == [(2, 0), (5, 0), (17, 0)]
+    whole = fontfix.parse_fontfix_output(text)
+    assert whole["ready"] is True
+    assert whole["summary"] == (17, 0)
+    assert len(whole["replacements"]) == 24
+
+
+def test_parsed_console_publishes_the_temp_drawing(tmp_path):
+    text = STDOUT_FIXTURE.read_text(encoding="utf-8")
+    src = tmp_path / "行政中心5F.dwg"
+    _dwg(src)
+    produced = tmp_path / "in_0f39ae94f9.dwg"
+    _dwg(produced, b"fixed")
+    dest = tmp_path / "輸出" / "行政中心5F.dwg"
+    job = {
+        "rec": {
+            "file": str(src),
+            "output": str(dest),
+            "status": "",
+            "styles_replaced": 0,
+            "replacements": "",
+            "replacement_rows": [],
+            "still_missing": "",
+            "still_rows": [],
+            "error": "",
+            "elapsed_seconds": 0.0,
+        },
+        "src": src,
+        "dest": dest,
+        "sha_before": _sha(src),
+        "spath": "D:/drawings/output/logs/tmp/in_0f39ae94f9.dwg",
+        "produced": produced,
+        "console": _done_slices(text)[1],
+        "opened_name": "in_0f39ae94f9.dwg",
+        "elapsed": 1.2,
+    }
+    rec = fontfix_batch._finish_job(job, True)
+    assert rec["status"] == "SAVED"
+    assert rec["error"] == ""
+    assert rec["styles_replaced"] == 5
+    assert "ACSE | sino2.shx -> romans.shx |  -> " in rec["replacements"]
+    assert dest.is_file() and dest.read_bytes().startswith(b"AC1032")
+    assert not produced.exists()
+    assert _sha(src) == job["sha_before"]
 
 
 # ---------------------------------------------------------------------------

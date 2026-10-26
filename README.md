@@ -5,7 +5,7 @@
 
 | 項目 | 狀態 |
 | --- | --- |
-| 自動化測試 | 248 collected。無 AutoCAD 的環境為 226 passed / 22 skipped（含缺字體修復；`accore` 測試在 AutoCAD 2027 上才會執行） |
+| 自動化測試 | 252 collected。無 AutoCAD 的環境為 230 passed / 22 skipped（含缺字體修復；`accore` 測試在 AutoCAD 2027 上才會執行） |
 | Real project validation | SB12 Round 1 FAIL（v1.5）→ Round 2 PASS（P0 修正，v1.5.1）→ Round 3 PASS（P1 evidence metadata，v1.5.2）；見 [docs/REAL_PROJECT_VALIDATION_STATUS.md](docs/REAL_PROJECT_VALIDATION_STATUS.md) |
 | Production Approval | NOT APPROVED |
 | 版本標籤 | `v1.6.0`（前版 `v1.5.2`、`v1.5.1`、`v1.5-semantic-validation-candidate`） |
@@ -84,6 +84,8 @@ GUI log 寫入 `output\logs\gui.log`。掃描不會執行 AutoCAD、不修改任
 「另存版本」預設「維持目前格式」（`QSAVE`，不改 DWG 版本）。選 2018／2013／2010／2007／2004／2000／R14 時改走 `SAVEAS` 的格式關鍵字。這個版本切換在沒有 AutoCAD 的環境無法執行，請在本機 AutoCAD 2027 用下方步驟確認。
 
 實作取捨：accoreconsole 不能穩定使用 COM／ObjectDBX，所以樣式是用 AutoLISP `entmod` 改 STYLE 表，而不是原型裡的 ActiveX。TrueType 字型名稱由 Python 讀登錄後寫進 UTF-8（含 BOM）的 LISP；`findfile` 與 Windows 字型資料夾仍在 AutoCAD 裡檢查。批次開始前會把 `FONTALT` 設成 `txt.shx`，只為了避免缺字對話框卡住主控台，不會改寫樣式表。`XREF|樣式` 這類被鎖住的外部參考樣式若 `entmod` 被拒絕，會出現在「仍缺字」或錯誤欄，不會改到外部參考的來源檔。
+
+修復結果用 `|=|` 分隔欄位。accoreconsole 會把 LISP 印出的定位字元（tab）展開成不定數量的空白，空的大字體欄位會消失，含空白的字型名稱（例如 `Microsoft JhengHei.ttf`）也會被切碎。用定位字元解析時，三張圖都會變成「沒有收到修復結果」，暫存 DWG 也不會搬進輸出資料夾。解析器仍讀得懂舊的定位字元，以及這次實測留下的空白分隔輸出。
 
 本機確認（Windows、AutoCAD 2027，不是 LT）：
 1. 選「缺字體修復」，輸入資料夾放含缺字 SHX 的 DWG，輸出選另一個資料夾。可讓其中一個 DWG 維持在 AutoCAD 開啟。
