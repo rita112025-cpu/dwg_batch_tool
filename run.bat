@@ -2,6 +2,8 @@
 setlocal
 cd /d "%~dp0"
 chcp 65001 >nul
+set "PYTHONUTF8=1"
+set "PYTHONIOENCODING=utf-8"
 if not exist ".venv\Scripts\python.exe" (
   echo [FATAL] .venv not found. Run: python -m venv .venv ^& .venv\Scripts\pip install -r requirements.txt
   exit /b 2

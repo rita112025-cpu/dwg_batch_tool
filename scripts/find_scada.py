@@ -62,7 +62,23 @@ def _write(path, rows, fields):
         w.writerows(rows)
 
 
-def run(cfg, log=None, progress=None, stop_event=None):
+def write_results(cfg, hits, excluded, failed_files=None, stopped=False, log=None):
+    """Write collected search rows and return the standard run summary."""
+    log = log or (lambda level, msg: print(f"[{level}] {msg}"))
+    failed_files = list(failed_files or [])
+    out = resolve(cfg, "output_dir")
+    objects = scada_rules.build_object_hits(hits)
+    (out / "csv").mkdir(parents=True, exist_ok=True)
+    _write(out / "csv" / "scada_hits.csv", hits, HIT_FIELDS)
+    _write(out / "csv" / "object_hits.csv", objects, OBJECT_FIELDS)
+    _write(out / "csv" / "scada_excluded.csv", excluded, HIT_FIELDS)
+    if excluded:
+        log("INFO", f"excluded noise hits: {len(excluded)} (see scada_excluded.csv)")
+    return dict(hits=len(hits), objects=len(objects), excluded=len(excluded),
+                failed=len(failed_files), failed_files=failed_files, stopped=stopped)
+
+
+def run(cfg, log=None, progress=None, stop_event=None, files=None):
     """Returns dict(hits, objects, excluded, failed, stopped). Always writes the three CSVs
     (header only when nothing matched)."""
     log = log or (lambda level, msg: print(f"[{level}] {msg}"))
@@ -71,10 +87,9 @@ def run(cfg, log=None, progress=None, stop_event=None):
     root = out / "dxf"
     rules = scada_rules.build_rules(cfg)
     hits, excluded = [], []
-    failed = 0
     failed_files = []
     stopped = False
-    files = sorted(root.rglob("*.dxf"))
+    files = sorted(Path(p) for p in files) if files is not None else sorted(root.rglob("*.dxf"))
     for n, p in enumerate(files, 1):
         if stop_event is not None and stop_event.is_set():
             stopped = True
@@ -85,19 +100,10 @@ def run(cfg, log=None, progress=None, stop_event=None):
             hits += h
             excluded += x
         except Exception as e:  # noqa: BLE001
-            failed += 1
             failed_files.append(f"{p.name}: {type(e).__name__}: {e}")
             log_error(cfg, f"find_scada {p}: {type(e).__name__}: {e}")
             log("ERROR", f"search {p.name}: {type(e).__name__}: {e}")
-    objects = scada_rules.build_object_hits(hits)
-    (out / "csv").mkdir(parents=True, exist_ok=True)
-    _write(out / "csv" / "scada_hits.csv", hits, HIT_FIELDS)
-    _write(out / "csv" / "object_hits.csv", objects, OBJECT_FIELDS)
-    _write(out / "csv" / "scada_excluded.csv", excluded, HIT_FIELDS)
-    if excluded:
-        log("INFO", f"excluded noise hits: {len(excluded)} (see scada_excluded.csv)")
-    return dict(hits=len(hits), objects=len(objects), excluded=len(excluded), failed=failed,
-                failed_files=failed_files, stopped=stopped)
+    return write_results(cfg, hits, excluded, failed_files, stopped, log)
 
 
 def main(cfg=None):

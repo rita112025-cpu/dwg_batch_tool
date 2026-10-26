@@ -184,7 +184,9 @@ def _parse_cad(path, store, cfg, out, stop_event):
         target = out / 'cad' / 'dxf' / (path.stem + '_' + token + '.dxf')
         result = convert(path, target, cfg['accoreconsole'], cfg, overwrite=True, stop_event=stop_event)
         if result['status'] != 'DXF_VALID': raise RuntimeError(str(result))
-    rows, info = analyze_dxf.analyze(target, str(path))
+    import ezdxf
+    doc = ezdxf.readfile(target)
+    rows, info = analyze_dxf.analyze_doc(doc, str(path))
     attributes = {}
     for attr in rows['attribs']:
         attributes.setdefault(attr.get('parent_handle'), []).append(attr)
@@ -204,10 +206,10 @@ def _parse_cad(path, store, cfg, out, stop_event):
     json_dir = out / 'cad' / 'json'
     json_dir.mkdir(parents=True, exist_ok=True)
     (json_dir / (path.stem + '_' + token + '.json')).write_text(json.dumps(dict(index=info, **rows), ensure_ascii=False), encoding='utf-8')
-    import ezdxf
     import scada_rules
-    hits, excluded = find_scada.search_doc(ezdxf.readfile(target), str(path), scada_rules.build_rules(cfg))
-    for name, values in [('scada_hits', hits), ('scada_excluded', excluded), ('object_hits', scada_rules.build_object_hits(hits)), ('block_summary', scada_rules.build_block_summary(rows['blocks'], scada_rules.build_rules(cfg), rows['attribs']))]:
+    rules = scada_rules.build_rules(cfg)
+    hits, excluded = find_scada.search_doc(doc, str(path), rules)
+    for name, values in [('scada_hits', hits), ('scada_excluded', excluded), ('object_hits', scada_rules.build_object_hits(hits)), ('block_summary', scada_rules.build_block_summary(rows['blocks'], rules, rows['attribs']))]:
         for row in values: store.report('cad/'+name+'.csv', dict(row, **evidence(path, 'CAD', row.get('handle', ''))))
     store.report('cad/file_index.csv', evidence(path, 'CAD', **info, status='OK'))
     return 'OK'
@@ -306,9 +308,10 @@ def run_pipeline(cfg, opts, log=None, progress=None, stop_event=None):
     _log("OK", f"environment OK ({env['autocad']}, ezdxf {env['ezdxf']})")
 
     if opts["convert"]:
-        n = len(batch_convert.list_dwg(cfg))
+        dwg_files = batch_convert.list_dwg(cfg)
+        n = len(dwg_files)
         _log("INFO", f"found {n} DWG")
-        s = batch_convert.run(cfg, _log, _prog("DWG→DXF"), stop_event)
+        s = batch_convert.run(cfg, _log, _prog("DWG→DXF"), stop_event, files=dwg_files)
         summary.update(dwg=s["total"], ok=s["ok"], failed=s["failed"], skipped=s["skipped"])
         summary["failed_files"] += s["failed_files"]
         if s["fatal"]:
@@ -319,20 +322,47 @@ def run_pipeline(cfg, opts, log=None, progress=None, stop_event=None):
             summary["stopped"] = True
             _log("WARN", "stopped by user")
             return finish()
-    summary["dxf"] = len(list((out / "dxf").rglob("*.dxf")))
+    dxf_files = sorted((out / "dxf").rglob("*.dxf"))
+    summary["dxf"] = len(dxf_files)
 
+    shared_search = None
     if opts["analyze"] and not stopped():
         _log("INFO", "analyzing DXF")
-        a = analyze_dxf.run(cfg, opts["csv"], opts["json"], _log, _prog("Analyze"), stop_event)
+        if opts["scada"]:
+            import scada_rules
+            rules = scada_rules.build_rules(cfg)
+            search_hits, search_excluded, search_failed = [], [], []
+
+            def collect_search(doc, rel):
+                try:
+                    hits, excluded = find_scada.search_doc(doc, rel, rules)
+                    search_hits.extend(hits)
+                    search_excluded.extend(excluded)
+                except Exception as exc:  # noqa: BLE001
+                    message = f"{rel}: {type(exc).__name__}: {exc}"
+                    search_failed.append(message)
+                    log_error(cfg, f"find_scada {message}")
+                    _log("ERROR", f"search {message}")
+        else:
+            collect_search = None
+        stage = "Analyze + SCADA" if collect_search is not None else "Analyze"
+        a = analyze_dxf.run(cfg, opts["csv"], opts["json"], _log, _prog(stage), stop_event,
+                            files=dxf_files, document_callback=collect_search)
         if a["failed"]:
             _log("WARN", f"{a['failed']} DXF failed to analyze")
         summary["analyze_failed"] = a["failed"]
         summary["failed_files"] += [f"(analyze) {x}" for x in a["failed_files"]]
         summary["suspect_texts"] = a["suspect"]
         summary["stopped"] |= a["stopped"]
+        if collect_search is not None:
+            shared_search = (search_hits, search_excluded,
+                             search_failed + list(a["failed_files"]), a["stopped"])
     if opts["scada"] and not stopped():
         _log("INFO", "SCADA keyword search")
-        r = find_scada.run(cfg, _log, _prog("SCADA"), stop_event)
+        if shared_search is None:
+            r = find_scada.run(cfg, _log, _prog("SCADA"), stop_event, files=dxf_files)
+        else:
+            r = find_scada.write_results(cfg, *shared_search, log=_log)
         summary["keyword_hits"] = r["hits"]
         summary["unique_objects"] = r["objects"]
         summary["failed_files"] += [f"(search) {x}" for x in r["failed_files"]]

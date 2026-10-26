@@ -19,7 +19,7 @@ def list_dwg(cfg):
     return sorted(p for p in inp.glob(pattern) if p.is_file() and p.suffix.lower() == ".dwg")
 
 
-def run(cfg, log=None, progress=None, stop_event=None):
+def run(cfg, log=None, progress=None, stop_event=None, files=None):
     """Batch convert. log(level, msg); progress(index, total, current_path).
     Returns dict(total, ok, failed, stopped, fatal, results)."""
     log = log or (lambda level, msg: print(f"[{level}] {msg}"))
@@ -32,7 +32,7 @@ def run(cfg, log=None, progress=None, stop_event=None):
         stats["fatal"] = f"accoreconsole not found: {accore}"
         return stats
     inp, out = resolve(cfg, "input_dir"), resolve(cfg, "output_dir")
-    files = list_dwg(cfg)
+    files = list_dwg(cfg) if files is None else [Path(p) for p in files]
     stats["total"] = len(files)
     logs = out / "logs"
     try:
