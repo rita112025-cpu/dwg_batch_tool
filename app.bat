@@ -1,5 +1,8 @@
 @echo off
+setlocal
 cd /d "%~dp0"
+set "PYTHONUTF8=1"
+set "PYTHONIOENCODING=utf-8"
 if not exist ".venv\Scripts\pythonw.exe" goto :novenv
 start "" .venv\Scripts\pythonw.exe app.py
 exit /b 0
