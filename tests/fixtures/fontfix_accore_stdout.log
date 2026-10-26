@@ -1,0 +1,243 @@
+Redirect stdout (file: C:\Users\user\AppData\Local\Temp\accc671882).
+AcCoreConsole: StdOutConsoleMode: processed-output: disabled,auto
+AutoCAD Core Engine Console - Copyright 2026 Autodesk, Inc.  All rights reserved. (X.118.0.0)
+
+Execution Path:
+C:\Program Files\Autodesk\AutoCAD 2027\accoreconsole.exe
+Current Directory: D:\github\dwg_batch_tool
+
+Version Number: X.118.0.0 (UNICODE)
+LogFilePath has been set to the working folder.
+CoreHeartBeat
+正在重生模型。
+使用 Autodesk 紀要中的 acadiso.dwt 建立的圖面: <<未具名紀要>>
+**** 系統變數已變更 ****
+1 個受監視的系統變數已變更偏好值。使用 SYSVARMONITOR 指令以檢視變更。
+
+
+AutoCAD 功能表公用程式 已載入。
+指令:
+指令:
+
+指令:
+指令: FILEDIA
+
+輸入 FILEDIA 的新值 <0>: 0
+
+指令: CMDDIA
+
+輸入 CMDDIA 的新值 <1>: 0
+
+指令: EXPERT
+
+輸入 EXPERT 的新值 <0>: 5
+
+指令: FONTALT
+
+輸入 FONTALT 的新值，或 (.) 表示無 <"simplex.shx">: txt.shx
+
+指令: SECURELOAD
+
+輸入 SECURELOAD 的新值 <1>: 0
+
+指令: (load "D:/drawings/output/logs/tmp/fontfix_run.lsp")
+
+FONTFIX_READY
+
+指令: _.OPEN
+
+輸入欲開啟的圖檔名稱 <.>: "D:/drawings/output/logs/tmp/in_e2c0fd78d0.dwg"
+正在重生模型。
+CoreHeartBeat
+
+指令:
+
+指令:
+指令: (princ (strcat "\nDWGB" "ATCH_OPEN_0|" (getvar "DWGNAME") "|\n"))
+
+DWGBATCH_OPEN_0|in_e2c0fd78d0.dwg|
+"\nDWGBATCH_OPEN_0|in_e2c0fd78d0.dwg|\n"
+
+指令: (if (and (boundp 'ff-fix-current) ff-fix-current) (ff-fix-current) (princ (strcat "\nFONTFIX_" "ERROR\tlisp not loaded\n")))
+
+FONTFIX_REPLACED   DIM  romanc.shx       romanc.shx   genie.shx chineset.shx
+
+FONTFIX_REPLACED   CDP40-05F-CSD(mitc)-20221228$0$Ascii       ascii.shx  romans.shx       chinese.shx    chineset.shx
+
+FONTFIX_SUMMARY  2     0
+
+指令: _.QSAVE
+
+指令: (princ (strcat "\nDWGB" "ATCH_DONE_0_\n"))
+
+DWGBATCH_DONE_0_
+"\nDWGBATCH_DONE_0_\n"
+
+指令: _.OPEN
+
+輸入欲開啟的圖檔名稱 <D:\drawings\output\logs\tmp\in_e2c0fd78d0.dwg>: "D:/drawings/output/logs/tmp/in_0f39ae94f9.dwg"
+正在載入 AEC Base...
+正在載入 延伸的 AEC 基準...
+正在載入 AEC Core...
+正在載入 AEC Project Base...
+正在載入 AEC Architectural Base...
+正在載入 AEC Schedule...
+
+載入模型程式 DLL。
+正在載入 AEC Area Base...
+正在載入 MEP Base...
+正在載入 MEP HVAC Base...
+正在載入 MEP Pipe Base...
+正在載入 MEP Electrical Base...
+正在載入 MEP COLE Base...
+正在載入 MEP Plumbing Base...
+正在載入 MEP Tools...
+以 [txt.shx] 替換 [SINO2.shx]。
+以 [txt.shx] 替換 [sino2.shx]。
+正在重生模型。
+CoreHeartBeat
+
+指令:
+
+指令:
+指令: (princ (strcat "\nDWGB" "ATCH_OPEN_1|" (getvar "DWGNAME") "|\n"))
+
+DWGBATCH_OPEN_1|in_0f39ae94f9.dwg|
+"\nDWGBATCH_OPEN_1|in_0f39ae94f9.dwg|\n"
+
+指令: (if (and (boundp 'ff-fix-current) ff-fix-current) (ff-fix-current) (princ (strcat "\nFONTFIX_" "ERROR\tlisp not loaded\n")))
+
+FONTFIX_REPLACED   ACSE   sino2.shx romans.shx
+
+FONTFIX_REPLACED   DIM  romanc.shx       romanc.shx   genie.shx chineset.shx
+
+FONTFIX_REPLACED   S2H_161      Sino2_6.shx  romans.shx       chineset.shx     chineset.shx
+
+FONTFIX_REPLACED   S2 SINO2.shx    romans.shx
+
+FONTFIX_REPLACED   CDP40-05F-CSD(mitc)-20221228$0$Ascii       ascii.shx  romans.shx       chinese.shx    chineset.shx
+
+FONTFIX_SUMMARY  5     0
+
+指令: _.QSAVE
+
+指令: (princ (strcat "\nDWGB" "ATCH_DONE_1_\n"))
+
+DWGBATCH_DONE_1_
+"\nDWGBATCH_DONE_1_\n"
+
+指令: _.OPEN
+
+輸入欲開啟的圖檔名稱 <D:\drawings\output\logs\tmp\in_0f39ae94f9.dwg>: "D:/drawings/output/logs/tmp/in_9601f9d0d4.dwg"
+以 [txt.shx] 替換 [SINO2.shx]。
+以 [txt.shx] 替換 [sino2.shx]。
+以 [txt.shx] 替換 [SINO2.shx]。
+以 [txt.shx] 替換 [sino2.shx]。
+以 [txt.shx] 替換 [SINO2.shx]。
+以 [txt.shx] 替換 [msdefault.shx]。
+以 [txt.shx] 替換 [Sino2_6.shx]。
+正在重生模型。
+
+指令: 遇到自訂物件。
+
+
+指令:
+指令: (princ (strcat "\nDWGB" "ATCH_OPEN_2|" (getvar "DWGNAME") "|\n"))
+
+DWGBATCH_OPEN_2|in_9601f9d0d4.dwg|
+"\nDWGBATCH_OPEN_2|in_9601f9d0d4.dwg|\n"
+
+指令: (if (and (boundp 'ff-fix-current) ff-fix-current) (ff-fix-current) (princ (strcat "\nFONTFIX_" "ERROR\tlisp not loaded\n")))
+
+FONTFIX_REPLACED   MITAC    ctcichn0.shx      romans.shx sino161.shx      chineset.shx
+
+FONTFIX_REPLACED   LB01-04F-CSD(mitc)$0$Standard       ascii.shx  romans.shx       chinese.shx    chineset.shx
+
+FONTFIX_REPLACED   LB01-Sec$0$Standard    ascii.shx   romans.shx  chinese.shx chineset.shx
+
+FONTFIX_REPLACED   LSP  ascii-rei.shx   romans.shx  chinese.shx chineset.shx
+
+FONTFIX_REPLACED   Ascii    ascii_c.shx     romans.shx      chinese.shx  chineset.shx
+
+FONTFIX_REPLACED   ENG  ASCII.shx      romans.shx chineset.shx       chineset.shx
+
+FONTFIX_REPLACED   Style-Sino2_6-Sino161      Sino2_6.shx  romans.shx
+
+FONTFIX_REPLACED   Style-msdefault       msdefault.shx      romans.shx
+
+FONTFIX_REPLACED   Style-Sino2-Sino161    SINO2.shx   romans.shx
+
+FONTFIX_REPLACED   Style-ks       sino2.shx  romans.shx
+
+FONTFIX_REPLACED   Style-SINO2-chineset     SINO2.shx     romans.shx      chineset.shx   chineset.shx
+
+FONTFIX_REPLACED   Style-Sino2   SINO2.shx romans.shx
+
+FONTFIX_REPLACED   ACSE   sino2.shx romans.shx
+
+FONTFIX_REPLACED   DIM  romanc.shx       romanc.shx   genie.shx chineset.shx
+
+FONTFIX_REPLACED   S2H_161      Sino2_6.shx  romans.shx       chineset.shx     chineset.shx
+
+FONTFIX_REPLACED   S2 SINO2.shx    romans.shx
+
+FONTFIX_REPLACED   CDP40-05F-CSD(mitc)-20221228$0$Ascii       ascii.shx  romans.shx       chinese.shx    chineset.shx
+
+FONTFIX_SUMMARY  17      0
+
+指令: _.QSAVE
+更新圖塊 *Model_Space 的索引
+完成。
+更新圖塊 汐東圖框 - PECL_A1_AR_行政大樓-7352871-行政大樓五層平面圖_1_2_ 的索引
+完成。
+更新圖塊 OCC5FPLAN 的索引
+完成。
+更新圖塊 20260511-1278PARDPG1F20260306_廠區配置圖_(底圖) 的索引
+完成。
+更新圖塊 rheherhthjetjjrjrtjjthjtettjt_5_1 的索引
+完成。
+更新圖塊 rheherhthjetjjrjrtjjthjtettjt_5_1_1 的索引
+完成。
+更新圖塊 移動式同步抬車機組_2_1_1_1 的索引
+完成。
+更新圖塊 移動式同步抬車機組_1_1 的索引
+完成。
+更新圖塊 XFT-1F$0$A$C0E071665_1_1 的索引
+完成。
+更新圖塊 移動式同步抬車機組_2_1 的索引
+完成。
+更新圖塊 *U2494 的索引
+完成。
+更新圖塊 *U2749 的索引
+完成。
+更新圖塊 *U2898 的索引
+完成。
+更新圖塊 *U3066 的索引
+完成。
+更新圖塊 UWL_1 的索引
+完成。
+更新圖塊 A$Cbbfffb36 的索引
+完成。
+更新圖塊 Depot及主線路徑需求參數(不含道岔區域)_20260716_rev01 的索引
+完成。
+更新圖塊 汐東圖框 - PECL_A1_AR_行政大樓-7352868-行政大樓六層平面圖_1_2_ 的索引
+完成。
+更新圖塊 6F-2 的索引
+完成。
+更新圖塊 行政中心6F-1151027 的索引
+完成。
+
+指令: (princ (strcat "\nDWGB" "ATCH_DONE_2_\n"))
+
+DWGBATCH_DONE_2_
+"\nDWGBATCH_DONE_2_\n"
+
+指令: _.QUIT
+
+**** 系統變數已變更 ****
+2 個受監視的系統變數已變更偏好值。使用 SYSVARMONITOR 指令以檢視變更。
+
+指令:
+**** 系統變數已變更 ****
+1 個受監視的系統變數已變更偏好值。使用 SYSVARMONITOR 指令以檢視變更。
+LogFilePath has been restored to ''.
