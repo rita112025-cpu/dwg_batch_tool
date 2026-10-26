@@ -39,15 +39,15 @@ def test_mode_defaults_and_environment_gating(monkeypatch, tk_root):
     assert not a.env_details.winfo_manager()
     assert not a.kw_frame.winfo_manager()
     assert not a.more_results.winfo_manager()
-    assert a.log_frame.winfo_manager()
+    assert not a.log_frame.winfo_manager()
     a._toggle_env_details()
     assert a.env_details.winfo_manager()
     a._toggle_env_details()
     assert not a.env_details.winfo_manager()
     a._toggle_log()
-    assert not a.log_frame.winfo_manager()
-    a._toggle_log()
     assert a.log_frame.winfo_manager()
+    a._toggle_log()
+    assert not a.log_frame.winfo_manager()
     original_convert = a.opts["convert"].get()
     original_keywords = a._keywords()
     for mode in ("scan", "analysis", "version", "fontfix", "dwg"):
@@ -71,6 +71,26 @@ def test_mode_defaults_and_environment_gating(monkeypatch, tk_root):
     a.v_mode.set("analysis")
     a._refresh_mode_ui()
     assert str(a.btn_analysis["state"]) == "normal"       # non-DWG analysis stays available
+
+
+def test_shared_run_shortcut_dispatches_selected_mode(monkeypatch, tk_root):
+    import app as appmod
+    monkeypatch.setattr(appmod.App, "_check_env", lambda self: None)
+    _fresh(tk_root)
+    a = appmod.App(tk_root)
+    called = []
+    actions = {
+        "scan": "_scan",
+        "version": "_scan_versions",
+        "fontfix": "_start_fontfix",
+        "dwg": "_start",
+        "analysis": "_start_analysis",
+    }
+    for mode, method in actions.items():
+        monkeypatch.setattr(a, method, lambda selected=mode: called.append(selected))
+        a.v_mode.set(mode)
+        assert a._run_selected() == "break"
+    assert called == list(actions)
 
 
 def test_primary_result_selection(tmp_path):

@@ -168,6 +168,9 @@ class App:
         self.v_env = {k: tk.StringVar(value=f"{k}: ...") for k in
                       ("Python", "ezdxf", "AutoCAD", "accoreconsole")}
         self._build()
+        self.root.bind("<Control-Return>", self._run_selected)
+        self.root.bind("<Escape>", self._stop_shortcut)
+        self.root.bind("<F5>", self._recheck_shortcut)
         self.root.after(100, self._poll)
         self._check_env()
 
@@ -175,10 +178,27 @@ class App:
     # Five numbered sections in one scrollable column. Only the selected job's settings are visible.
     def _build(self):
         pad = dict(padx=8, pady=4)
+        style = ttk.Style(self.root)
+        style.configure("Primary.TButton", padding=(12, 6))
+        style.configure("Danger.TButton", padding=(10, 5))
+
         shell = ttk.Frame(self.root)
         shell.pack(fill="both", expand=True)
-        self.form_canvas = tk.Canvas(shell, highlightthickness=0)
-        scrollbar = ttk.Scrollbar(shell, orient='vertical', command=self.form_canvas.yview)
+
+        header = ttk.Frame(shell, padding=(16, 12, 16, 10))
+        header.pack(fill="x")
+        ttk.Label(header, text="SCADA DWG Analyzer", font=("Segoe UI", 16)).grid(
+            row=0, column=0, sticky="w")
+        ttk.Label(header, text="批次檢查、轉檔與工程資料分析", foreground="#4B5563").grid(
+            row=1, column=0, sticky="w", pady=(2, 0))
+        ttk.Label(header, text="Ctrl+Enter 執行  ·  Esc 停止  ·  F5 重新檢查",
+                  foreground="#4B5563").grid(row=0, column=1, rowspan=2, sticky="e")
+        header.columnconfigure(0, weight=1)
+
+        body = ttk.Frame(shell)
+        body.pack(fill="both", expand=True)
+        self.form_canvas = tk.Canvas(body, highlightthickness=0)
+        scrollbar = ttk.Scrollbar(body, orient='vertical', command=self.form_canvas.yview)
         scrollbar.pack(side='right', fill='y')
         self.form_canvas.pack(side='left', fill='both', expand=True)
         self.form_canvas.configure(yscrollcommand=scrollbar.set)
@@ -350,23 +370,28 @@ class App:
         self.btn_fontfix = ttk.Button(fontfix_box, text="開始修復字體", command=self._start_fontfix)
         self.btn_fontfix.pack(anchor="w", pady=(4, 0))
 
+        for button in (self.btn_scan, self.btn_versions, self.btn_start,
+                       self.btn_analysis, self.btn_fontfix):
+            button.configure(style="Primary.TButton")
+
         # ---- 4 執行狀態 ----
         st = ttk.LabelFrame(main, text="④ 執行狀態")
         st.pack(fill="both", expand=True, **pad)
+        self.status_frame = st
         pf = ttk.Frame(st)
         pf.pack(fill="x", padx=6, pady=(4, 0))
         self.progress_bar = ProgressBar(pf, self.v_progress)
         self.progress_bar.pack(side="left", fill="x", expand=True)
         ttk.Label(pf, textvariable=self.v_ptext, width=28).pack(side="left", padx=(8, 0))
+        self.btn_stop = ttk.Button(pf, text="停止", command=self._stop, state="disabled",
+                                   style="Danger.TButton")
+        self.btn_stop.pack(side="right", padx=(8, 0))
         cur = ttk.Label(st, textvariable=self.v_current, anchor="w", wraplength=800, justify="left")
         cur.pack(fill="x", padx=8, pady=(3, 0))
         self._wrap_to_width(cur, st)
-        self.btn_stop = ttk.Button(st, text="停止", command=self._stop, state="disabled")
-        self.btn_stop.pack(anchor="w", padx=8, pady=(4, 2))
-        self.log_toggle = ttk.Button(st, text="執行記錄 ▾", command=self._toggle_log)
-        self.log_toggle.pack(anchor="w", padx=8, pady=(2, 0))
+        self.log_toggle = ttk.Button(st, text="執行記錄 ▸", command=self._toggle_log)
+        self.log_toggle.pack(anchor="w", padx=8, pady=(4, 2))
         self.log_frame = ttk.Frame(st)
-        self.log_frame.pack(fill="both", expand=True, padx=6, pady=6)
         self.log_box = scrolledtext.ScrolledText(self.log_frame, height=7, state="disabled", font=("Consolas", 9))
         self.log_box.pack(fill="both", expand=True)
         for state, color in LOG_FG.items():
@@ -505,6 +530,32 @@ class App:
         self._set_busy_ui(self._busy())
         self._refresh_analysis_outputs()
 
+    def _run_selected(self, _event=None):
+        """Run the selected job from the shared Ctrl+Enter shortcut."""
+        if not self._busy():
+            action = {
+                "scan": self._scan,
+                "version": self._scan_versions,
+                "fontfix": self._start_fontfix,
+                "dwg": self._start,
+                "analysis": self._start_analysis,
+            }.get(self.v_mode.get())
+            if action is not None:
+                action()
+        return "break"
+
+    def _stop_shortcut(self, _event=None):
+        """Stop a cancellable run with Escape; do nothing while idle."""
+        if self._busy() and self._can_stop and str(self.btn_stop["state"]) != "disabled":
+            self._stop()
+        return "break"
+
+    def _recheck_shortcut(self, _event=None):
+        """Recheck the environment with F5 when controls are available."""
+        if not self._busy() and str(self.btn_recheck["state"]) != "disabled":
+            self._check_env()
+        return "break"
+
     def _set_busy_ui(self, busy):
         """Centralised enable/disable policy for all job controls."""
         state = "disabled" if busy else "normal"
@@ -517,6 +568,8 @@ class App:
         cancellable = busy and self._can_stop
         self.btn_stop.configure(state="normal" if cancellable else "disabled")
         self._refresh_analysis_outputs()
+        if busy:
+            self.root.after_idle(lambda: self._reveal(self.status_frame))
 
     def _get_primary_result(self):
         return get_primary_result(self.v_mode.get(), self.v_out.get().strip())
