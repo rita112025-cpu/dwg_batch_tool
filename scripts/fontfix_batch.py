@@ -1,10 +1,13 @@
-"""Copy every DWG to the output folder with missing text-style fonts replaced.
+"""Copy every DWG and DWT to the output folder with missing text-style fonts replaced.
 
-Originals are never opened for write. Each source is copied to an ASCII temp file
-first, including when AutoCAD already has the drawing open (it shares the file for
-read). accoreconsole then opens that copy, loads the generated UTF-8 LISP, and
-QSAVE (current format) or SAVEAS (an explicit version keyword). Python moves the
-temp DWG to the final path, which may contain Chinese characters or spaces.
+Originals are never opened for write. Each source is copied to an ASCII temp ``.dwg``
+first, including when AutoCAD already has the file open (it shares the file for
+read). A template is copied to ``.dwg`` on purpose: AutoCAD ``OPEN`` on a ``.dwt``
+starts a new untitled drawing from the template instead of editing that file.
+accoreconsole then opens the copy, loads the generated UTF-8 LISP, and QSAVE
+(current format) or SAVEAS (an explicit version keyword). Python moves the saved
+bytes to the final path, which keeps the source suffix (``.dwt`` stays ``.dwt``)
+and may contain Chinese characters or spaces.
 
 One accoreconsole process handles the batch. A stalled MessageBox fails that file,
 kills only that process, and the rest of the batch continues in a new process.
@@ -159,15 +162,35 @@ def _run_launch(jobs, accore, lisp_path, timeout, stop_event, on_file_start, log
             _terminate(proc)
 
 
+def _same_path(left, right):
+    """True when two paths name the same file. Used to refuse publishing onto the source."""
+    src = Path(left)
+    dest = Path(right)
+    try:
+        if src.exists() and dest.exists() and os.path.samefile(src, dest):
+            return True
+    except OSError:
+        pass
+    try:
+        src_key = os.path.normcase(str(src.resolve()))
+        dest_key = os.path.normcase(str(dest.resolve()))
+    except OSError:
+        src_key = os.path.normcase(str(src))
+        dest_key = os.path.normcase(str(dest))
+    return src_key == dest_key
+
+
 def _publish_job(job):
-    """Move the saved temp DWG to the output path. The source drawing is not this file."""
+    """Move the saved temp drawing to the output path. The source file is not this file."""
+    if _same_path(job["src"], job["dest"]):
+        return False, "拒絕覆寫原始檔"
     produced = job["produced"]
     if not produced.exists() or produced.stat().st_size < 6 or not fontfix.is_dwg_file(produced):
         time.sleep(0.3)
     if not produced.exists() or produced.stat().st_size < 6:
-        return False, "沒有產生 DWG"
+        return False, "沒有產生圖檔"
     if not fontfix.is_dwg_file(produced):
-        return False, "輸出不是 DWG（檔頭不是 ACxxxx）"
+        return False, "輸出不是 DWG 或 DWT（檔頭不是 ACxxxx）"
     job["dest"].parent.mkdir(parents=True, exist_ok=True)
     last = "輸出檔案仍被 AutoCAD 鎖定"
     for _ in range(40):
@@ -179,7 +202,7 @@ def _publish_job(job):
     else:
         return False, last
     if not fontfix.is_dwg_file(job["dest"]):
-        return False, "搬移後的檔案不是 DWG"
+        return False, "搬移後的檔案不是 DWG 或 DWT"
     return True, ""
 
 
@@ -225,7 +248,7 @@ def _finish_job(job, lisp_ready):
     try:
         if sha256(job["src"]) != job["sha_before"]:
             rec["status"] = "FAILED"
-            rec["error"] = ((rec.get("error") or "") + " 來源 DWG 的內容在處理中被改變").strip()
+            rec["error"] = ((rec.get("error") or "") + " 來源圖檔的內容在處理中被改變").strip()
     except OSError as exc:
         rec["error"] = ((rec.get("error") or "") + f" 無法再讀取來源：{exc}").strip()
     return rec
@@ -247,7 +270,10 @@ def run(
     progress=None,
     log=None,
 ):
-    """Fix every DWG under ``input_dir`` into ``output_dir``.
+    """Fix every DWG and DWT under ``input_dir`` into ``output_dir``.
+
+    ``.dwt`` / ``.DWT`` are included. The published copy keeps that suffix.
+    A destination that resolves to the source is failed and not written.
 
     ``progress(index, total, path)`` is 1-based and fires when a file starts and
     when its result is known. ``log(level, message)`` receives short Traditional
@@ -284,7 +310,7 @@ def run(
         summary["fatal"] = f"輸出資料夾無法寫入：{exc}"
         return summary
 
-    files = fontfix.iter_dwgs(src_root, recursive)
+    files = fontfix.iter_dwgs(src_root, recursive, fontfix.FONTFIX_SUFFIXES)
     summary["dwg"] = len(files)
     version_label = VERSION_LABELS.get(version, version)
     text_log = (logs / "fontfix.log").open("w", encoding="utf-8")
@@ -369,7 +395,11 @@ def run(
                 "elapsed_seconds": 0.0,
             }
             job = {"rec": rec, "skip": False, "src": src, "dest": dest}
-            if dest.exists() and not overwrite:
+            if _same_path(src, dest):
+                rec["status"] = "FAILED"
+                rec["error"] = "拒絕覆寫原始檔"
+                job["skip"] = True
+            elif dest.exists() and not overwrite:
                 rec["status"] = "SKIPPED"
                 job["skip"] = True
             else:
@@ -395,6 +425,9 @@ def run(
                 if job["skip"]:
                     pending_skips.append(job)
                     continue
+                # Stay on .dwg here even when the source is .dwt. OPEN of a .dwt
+                # creates a new untitled drawing, and DWGNAME would no longer match.
+                # The published path below still uses the original .dwt suffix.
                 tmp_in = tmpdir / f"in_{job['token']}.dwg"
                 tmp_out = tmpdir / f"out_{job['token']}.dwg"
                 try:
@@ -488,7 +521,7 @@ def run(
 
 def main(argv=None):
     import argparse
-    parser = argparse.ArgumentParser(description="批次替換 DWG 中找不到的文字樣式字體")
+    parser = argparse.ArgumentParser(description="批次替換 DWG / DWT 中找不到的文字樣式字體")
     parser.add_argument("input_dir")
     parser.add_argument("output_dir")
     parser.add_argument("--accore", default="")

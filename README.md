@@ -5,7 +5,7 @@
 
 | 項目 | 狀態 |
 | --- | --- |
-| 自動化測試 | 276 collected。無 AutoCAD 的環境為 254 passed / 22 skipped（含缺字體修復、自動分圖層、文字擷取／取代；`accore` 測試在 AutoCAD 2027 上才會執行） |
+| 自動化測試 | 279 collected。無 AutoCAD 的環境為 257 passed / 22 skipped（含缺字體修復、自動分圖層、文字擷取／取代；`accore` 測試在 AutoCAD 2027 上才會執行） |
 | Real project validation | SB12 Round 1 FAIL（v1.5）→ Round 2 PASS（P0 修正，v1.5.1）→ Round 3 PASS（P1 evidence metadata，v1.5.2）；見 [docs/REAL_PROJECT_VALIDATION_STATUS.md](docs/REAL_PROJECT_VALIDATION_STATUS.md) |
 | Production Approval | NOT APPROVED |
 | 版本標籤 | `v1.6.0`（前版 `v1.5.2`、`v1.5.1`、`v1.5-semantic-validation-candidate`） |
@@ -66,7 +66,7 @@ GUI log 寫入 `output\logs\gui.log`。掃描不會執行 AutoCAD、不修改任
 
 ### 缺字體修復
 「② 我要做什麼？」選擇「缺字體修復」。使用上方的輸入／輸出資料夾（兩者不可相同，輸出也不可放在輸入裡面），按「開始修復字體」。
-每個 DWG 會先整檔複製到暫存檔再交給 `accoreconsole` 開啟，所以原始圖不會被改寫；正在 AutoCAD 裡開啟的圖只要還能讀取，也會用複本處理。勾選「包含子資料夾」時，輸出保留相同的資料夾結構。
+每個 DWG 與 DWT（大小寫不分，`.DWT` 也算）會先整檔複製到暫存檔再交給 `accoreconsole` 開啟，所以原始圖不會被改寫；正在 AutoCAD 裡開啟的圖只要還能讀取，也會用複本處理。勾選「包含子資料夾」時，輸出保留相同的資料夾結構。樣板的輸出副檔名維持 `.dwt` / `.DWT`，不會改存成 `.dwg`。暫存檔一律用 `.dwg`：AutoCAD 對 `.dwt` 執行 OPEN 會從樣板另開新圖，而不是編輯該檔。
 
 替換規則與已在 AutoCAD 2027 驗證過的 FONTFIX 原型相同：
 - 逐一讀取文字樣式的主字體（DXF group 3）與大字體（DXF group 4）。
@@ -76,7 +76,7 @@ GUI log 寫入 `output\logs\gui.log`。掃描不會執行 AutoCAD、不修改任
 - 存檔前再檢查一次，仍然找不到的樣式寫進結果。
 
 結果在輸出資料夾的 `logs\`：
-- `fontfix_results.csv`：每個 DWG 一列（檔案、狀態、替換明細、仍缺字、錯誤）。
+- `fontfix_results.csv`：每個 DWG / DWT 一列（檔案、狀態、替換明細、仍缺字、錯誤）。
 - `fontfix_results.jsonl`：同一批結果的結構化內容。
 - `fontfix.log`：繁中文字紀錄（替換了哪個樣式、舊字體、新字體）。
 - `fontfix_batch_*.stdout.log`：該次 accoreconsole 的主控台輸出。
@@ -88,12 +88,12 @@ GUI log 寫入 `output\logs\gui.log`。掃描不會執行 AutoCAD、不修改任
 修復結果用 `|=|` 分隔欄位。accoreconsole 會把 LISP 印出的定位字元（tab）展開成不定數量的空白，空的大字體欄位會消失，含空白的字型名稱（例如 `Microsoft JhengHei.ttf`）也會被切碎。用定位字元解析時，三張圖都會變成「沒有收到修復結果」，暫存 DWG 也不會搬進輸出資料夾。解析器仍讀得懂舊的定位字元，以及這次實測留下的空白分隔輸出。
 
 本機確認（Windows、AutoCAD 2027，不是 LT）：
-1. 選「缺字體修復」，輸入資料夾放含缺字 SHX 的 DWG，輸出選另一個資料夾。可讓其中一個 DWG 維持在 AutoCAD 開啟。
+1. 選「缺字體修復」，輸入資料夾放含缺字 SHX 的 DWG，並放至少一個 `.dwt` 與一個 `.DWT`。輸出選另一個資料夾。可讓其中一個檔案維持在 AutoCAD 開啟。
 2. 維持預設 `romans.shx`／`chineset.shx`，可加一筆對照（例如 `sino2.shx=txt.shx`），勾選子資料夾後開始。
 3. 進度會逐檔前進。原始檔時間與內容不變，被開啟的那張圖也沒被存回。
-4. 輸出的 DWG 在 AutoCAD 2027（zh-TW）打開時，被替換的樣式不再跳缺字；`Microsoft JhengHei.ttf`、`arial.ttf`、`txt` 與 `@` 開頭的樣式維持原樣。
+4. 輸出的 DWG 在 AutoCAD 2027（zh-TW）打開時，被替換的樣式不再跳缺字；`Microsoft JhengHei.ttf`、`arial.ttf`、`txt` 與 `@` 開頭的樣式維持原樣。輸出的樣板檔名仍是 `.dwt` / `.DWT`（不會多出同名 `.dwg`），開啟後仍可當樣板，樣式替換與 DWG 相同。
 5. `logs\fontfix_results.csv` 與 `fontfix.log` 有舊字體 → 新字體，以及存檔後仍缺字的樣式。
-6. 「另存版本」選 AutoCAD 2013，再用「DWG / DWT 版本表」確認該檔是 `AC1027→2013`。
+6. 「另存版本」選 AutoCAD 2013，再用「DWG / DWT 版本表」確認該 DWG 與該 DWT 都是 `AC1027→2013`，且 DWT 輸出副檔名沒有變成 `.dwg`。
 7. 處理中按「停止」，批次會在目前檔案後停下，已完成的輸出保留。
 
 ### 文字擷取

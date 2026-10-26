@@ -326,15 +326,15 @@ class App:
                   font=(tkfont.nametofont("TkDefaultFont").actual("family"), 11)).pack(anchor="w")
         ttk.Label(
             fontfix_box,
-            text=("使用上方的輸入資料夾與輸出資料夾。每個 DWG 會複製到輸出資料夾，"
+            text=("使用上方的輸入資料夾與輸出資料夾。每個 DWG 與 DWT 會複製到輸出資料夾，"
                   "只替換找不到的文字樣式字體；已安裝的字體與 @ 開頭的直排字體保持原樣。\n"
-                  "不會修改原始圖檔。正在 AutoCAD 中開啟的圖也會先複製再處理。"),
+                  "不會修改原始圖檔，修復後的樣板仍是 .dwt。正在 AutoCAD 中開啟的圖也會先複製再處理。"),
             justify="left", wraplength=760,
         ).pack(anchor="w", pady=(2, 6))
         ttk.Checkbutton(fontfix_box, text="包含子資料夾（輸出保留相同的資料夾結構）",
                         variable=self.opts["recursive"]).pack(anchor="w")
         self.v_ff_overwrite = tk.BooleanVar(value=False)
-        ttk.Checkbutton(fontfix_box, text="覆寫既有的輸出 DWG",
+        ttk.Checkbutton(fontfix_box, text="覆寫既有的輸出 DWG / DWT",
                         variable=self.v_ff_overwrite).pack(anchor="w")
         form = ttk.Frame(fontfix_box)
         form.pack(fill="x", pady=(6, 0))
@@ -1004,7 +1004,7 @@ class App:
         self._can_stop = False
         self._set_busy_ui(False)
         if result.get("dwg", 0) == 0 and not result.get("fatal") and not result.get("stopped"):
-            state, verdict = "warning", "沒有找到 DWG"
+            state, verdict = "warning", "沒有找到 DWG 或 DWT"
         else:
             state, verdict = classify_outcome(result)
         failed_files = result.get("failed_files", [])
@@ -1018,7 +1018,7 @@ class App:
         st = STATE[state]
         self.v_result.set(
             f"{st['symbol']} {st['label']}：{verdict}\n"
-            f"DWG：{result.get('dwg', 0)}　成功：{result.get('ok', 0)}　"
+            f"DWG/DWT：{result.get('dwg', 0)}　成功：{result.get('ok', 0)}　"
             f"失敗：{result.get('failed', 0)}　略過：{result.get('skipped', 0)}\n"
             f"替換樣式：{result.get('styles_replaced', 0)}　"
             f"存檔後仍缺字：{result.get('warnings', 0)}\n"
