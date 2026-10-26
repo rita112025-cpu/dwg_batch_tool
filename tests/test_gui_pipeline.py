@@ -50,7 +50,7 @@ def test_mode_defaults_and_environment_gating(monkeypatch, tk_root):
     assert a.log_frame.winfo_manager()
     original_convert = a.opts["convert"].get()
     original_keywords = a._keywords()
-    for mode in ("scan", "analysis", "version", "fontfix", "dwg"):
+    for mode in ("scan", "analysis", "version", "fontfix", "layerclass", "dwg"):
         a.v_mode.set(mode)
         a._refresh_mode_ui()
         assert a.mode_frames[mode].winfo_manager()
@@ -95,6 +95,10 @@ def test_primary_result_selection(tmp_path):
     fontfix_csv.parent.mkdir(parents=True, exist_ok=True)
     fontfix_csv.touch()
     assert appmod.get_primary_result("fontfix", out) == fontfix_csv
+
+    moves = out / "logs" / "layerclass_moves.csv"
+    moves.touch()
+    assert appmod.get_primary_result("layerclass", out) == moves
 
     project_db = out / "database" / "project.db"
     project_db.touch()

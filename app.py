@@ -18,6 +18,8 @@ import pipeline  # noqa: E402
 import dwg_version  # noqa: E402
 import fontfix  # noqa: E402
 import fontfix_batch  # noqa: E402
+import layerclass  # noqa: E402
+import layerbatch  # noqa: E402
 
 try:  # crisp text on high-DPI Windows displays
     import ctypes
@@ -51,6 +53,7 @@ LOG_FG = {"success": "#1B6E2C", "warning": "#8A5A00", "failed": "#B3261E"}      
 PRIMARY_RESULTS = {
     "version": ("csv/dwg_versions.csv",),
     "fontfix": ("logs/fontfix_results.csv",),
+    "layerclass": ("logs/layerclass_moves.csv",),
     "dwg": ("csv/scada_hits.csv", "csv/file_index.csv"),
     "analysis": ("cross_reference/cross_reference.csv", "database/project.db"),
 }
@@ -235,6 +238,7 @@ class App:
         radio_row.pack(fill="x", padx=6, pady=6)
         self.mode_buttons = []
         modes = (("scan", "掃描資料夾"), ("version", "DWG / DWT 版本表"), ("fontfix", "缺字體修復"),
+                 ("layerclass", "自動分圖層"),
                  ("dwg", "DWG 轉 DXF + 解析"), ("analysis", "工程資料分析"))
         for i, (value, text) in enumerate(modes):
             radio = ttk.Radiobutton(radio_row, text=text, value=value, variable=self.v_mode,
@@ -350,6 +354,68 @@ class App:
         self.btn_fontfix = ttk.Button(fontfix_box, text="開始修復字體", command=self._start_fontfix)
         self.btn_fontfix.pack(anchor="w", pady=(4, 0))
 
+        layer_box = ttk.Frame(self.mode_frame)
+        self.mode_frames["layerclass"] = layer_box
+        ttk.Label(layer_box, text="自動分圖層",
+                  font=(tkfont.nametofont("TkDefaultFont").actual("family"), 11)).pack(anchor="w")
+        ttk.Label(
+            layer_box,
+            text=("圖面常常全部堆在圖層 0。這個模式依物件類型把實體搬到對應圖層，"
+                  "新圖層顏色依 ACI 1 到 9 循環；已經存在的圖層不改顏色。\n"
+                  "每個 DWG 先複製到暫存檔再處理，原始圖檔不會被改寫。"
+                  "圖塊定義裡的物件預設不改。"),
+            justify="left", wraplength=760,
+        ).pack(anchor="w", pady=(2, 6))
+        self.v_ly_scope = tk.StringVar(value="layer0")
+        scope = ttk.Frame(layer_box)
+        scope.pack(fill="x")
+        for code, label in layerclass.SOURCE_MODES:
+            ttk.Radiobutton(scope, text=label, value=code, variable=self.v_ly_scope).pack(side="left", padx=(0, 12))
+        ly_form = ttk.Frame(layer_box)
+        ly_form.pack(fill="x", pady=(4, 0))
+        self.v_ly_sources = tk.StringVar(value="0")
+        self.v_ly_prefix = tk.StringVar(value="")
+        self.v_ly_other = tk.StringVar(value="")
+        ttk.Label(ly_form, text="來源圖層", width=14).grid(row=0, column=0, sticky="w", pady=2)
+        ttk.Entry(ly_form, textvariable=self.v_ly_sources).grid(row=0, column=1, sticky="ew", pady=2)
+        ttk.Label(ly_form, text="圖層前綴", width=14).grid(row=1, column=0, sticky="w", pady=2)
+        ttk.Entry(ly_form, textvariable=self.v_ly_prefix).grid(row=1, column=1, sticky="ew", pady=2)
+        ttk.Label(ly_form, text="其他物件圖層", width=14).grid(row=2, column=0, sticky="w", pady=2)
+        ttk.Entry(ly_form, textvariable=self.v_ly_other).grid(row=2, column=1, sticky="ew", pady=2)
+        ly_form.columnconfigure(1, weight=1)
+        ttk.Label(layer_box, text="來源圖層只在「指定來源圖層」時使用，可用逗號分隔。其他物件圖層空白表示不搬。").pack(anchor="w")
+        self.v_ly_paper = tk.BooleanVar(value=False)
+        self.v_ly_blocks = tk.BooleanVar(value=False)
+        self.v_ly_insert = tk.BooleanVar(value=True)
+        self.v_ly_unlock = tk.BooleanVar(value=False)
+        self.v_ly_keep = tk.BooleanVar(value=True)
+        self.v_ly_dry = tk.BooleanVar(value=False)
+        self.v_ly_overwrite = tk.BooleanVar(value=False)
+        ttk.Checkbutton(layer_box, text="包含配置（紙空間）", variable=self.v_ly_paper).pack(anchor="w")
+        ttk.Checkbutton(layer_box, text="也修改圖塊定義裡的物件（每個插入都會跟著變）",
+                        variable=self.v_ly_blocks).pack(anchor="w")
+        ttk.Checkbutton(layer_box, text="圖塊（INSERT）放到與圖塊有效名稱相同的圖層",
+                        variable=self.v_ly_insert).pack(anchor="w")
+        ttk.Checkbutton(layer_box, text="暫時解鎖鎖定圖層，搬完再鎖回（沒勾就略過，並在結果列出圖層）",
+                        variable=self.v_ly_unlock).pack(anchor="w")
+        ttk.Checkbutton(
+            layer_box,
+            text="保持原外觀：BYLAYER 的顏色與線型改成原圖層的明確值（取消則改跟著新圖層的顏色）",
+            variable=self.v_ly_keep,
+        ).pack(anchor="w")
+        ttk.Checkbutton(layer_box, text="只產生清單，不輸出 DWG", variable=self.v_ly_dry).pack(anchor="w")
+        ttk.Checkbutton(layer_box, text="包含子資料夾（輸出保留相同的資料夾結構）",
+                        variable=self.opts["recursive"]).pack(anchor="w")
+        ttk.Checkbutton(layer_box, text="覆寫既有的輸出 DWG", variable=self.v_ly_overwrite).pack(anchor="w")
+        ttk.Label(layer_box, text="物件類型=圖層（空白圖層＝不搬；INSERT 不用寫在這裡）").pack(anchor="w", pady=(6, 2))
+        self.layer_map_text = tk.Text(layer_box, height=6, width=40, font=("Consolas", 10))
+        self.layer_map_text.pack(fill="x")
+        self.layer_map_text.insert("1.0", layerclass.DEFAULT_MAP_TEXT)
+        self.layer_map_text.bind("<Tab>", lambda e: (e.widget.tk_focusNext().focus_set(), "break")[1])
+        self.layer_map_text.bind("<Shift-Tab>", lambda e: (e.widget.tk_focusPrev().focus_set(), "break")[1])
+        self.btn_layer = ttk.Button(layer_box, text="開始分圖層", command=self._start_layerclass)
+        self.btn_layer.pack(anchor="w", pady=(6, 0))
+
         # ---- 4 執行狀態 ----
         st = ttk.LabelFrame(main, text="④ 執行狀態")
         st.pack(fill="both", expand=True, **pad)
@@ -404,6 +470,9 @@ class App:
             ("共用", (("開啟 errors.log", "logs/errors.log"), ("開啟 dwg_versions.csv", "csv/dwg_versions.csv"))),
             ("缺字體修復", (("開啟 fontfix_results.csv", "logs/fontfix_results.csv"),
                        ("開啟 fontfix.log", "logs/fontfix.log"))),
+            ("自動分圖層", (("開啟 layerclass_moves.csv", "logs/layerclass_moves.csv"),
+                       ("開啟 layerclass_results.csv", "logs/layerclass_results.csv"),
+                       ("開啟 layerclass.log", "logs/layerclass.log"))),
             ("DWG 結果", (("開啟 scada_hits.csv", "csv/scada_hits.csv"), ("開啟 object_hits.csv", "csv/object_hits.csv"),
                          ("開啟 file_index.csv", "csv/file_index.csv"))),
             ("工程分析結果", (("開啟 project.db", "database/project.db"),
@@ -510,10 +579,12 @@ class App:
         state = "disabled" if busy else "normal"
         for widget in (self.mode_buttons + self.browse_buttons +
                        [self.btn_scan, self.btn_versions, self.btn_analysis, self.btn_fontfix,
-                        self.btn_files, self.btn_folder, self.btn_recheck, self.btn_save_config]):
+                        self.btn_layer, self.btn_files, self.btn_folder, self.btn_recheck,
+                        self.btn_save_config]):
             widget.configure(state=state)
         self.btn_start.configure(state="normal" if not busy and self.env_ok else "disabled")
         self.btn_fontfix.configure(state="normal" if not busy and self.env_ok else "disabled")
+        self.btn_layer.configure(state="normal" if not busy and self.env_ok else "disabled")
         cancellable = busy and self._can_stop
         self.btn_stop.configure(state="normal" if cancellable else "disabled")
         self._refresh_analysis_outputs()
@@ -871,6 +942,102 @@ class App:
         self._refresh_analysis_outputs()
         self._reveal(self.result_frame)
 
+    def _start_layerclass(self):
+        if self._busy():
+            return
+        if not self.env_ok:
+            messagebox.showerror("無法分圖層", "找不到可用的 accoreconsole；請先完成環境設定並重新檢查。")
+            return
+        src = self.v_in.get().strip()
+        dst = self.v_out.get().strip()
+        problem = fontfix.directory_problem(src, dst)
+        if problem:
+            messagebox.showerror("路徑錯誤", problem)
+            return
+        type_map = self.layer_map_text.get("1.0", "end")
+        prefix = self.v_ly_prefix.get()
+        other = self.v_ly_other.get()
+        source_mode = self.v_ly_scope.get()
+        source_layers = self.v_ly_sources.get()
+        _settings, _notes, rule_error = layerclass.compile_rules(
+            type_map, prefix, other, source_mode, source_layers, self.v_ly_insert.get(),
+        )
+        if rule_error:
+            messagebox.showerror("分圖層設定", rule_error)
+            return
+        include_paper = self.v_ly_paper.get()
+        include_blocks = self.v_ly_blocks.get()
+        insert_by_name = self.v_ly_insert.get()
+        unlock_locked = self.v_ly_unlock.get()
+        keep_appearance = self.v_ly_keep.get()
+        dry_run = self.v_ly_dry.get()
+        overwrite = self.v_ly_overwrite.get()
+        recursive = self.opts["recursive"].get()
+        timeout = int(self.cfg.get("timeout_seconds", 300))
+        accore = self.cfg.get("accoreconsole", "")
+        self.stop_event.clear()
+        self._can_stop = True
+        self.summary = None
+        self.v_progress.set(0)
+        self.v_ptext.set("")
+        self.v_current.set("")
+        self.v_result.set("預覽分圖層中..." if dry_run else "分圖層中...")
+        self._set_status("running", "自動分圖層預覽中…" if dry_run else "自動分圖層中…")
+
+        def work():
+            try:
+                result = layerbatch.run(
+                    src, dst, accore, type_map=type_map, prefix=prefix, other=other,
+                    source_mode=source_mode, source_layers=source_layers,
+                    include_paper=include_paper, include_blocks=include_blocks,
+                    insert_by_name=insert_by_name, unlock_locked=unlock_locked,
+                    keep_appearance=keep_appearance, dry_run=dry_run,
+                    recursive=recursive, overwrite=overwrite, timeout=timeout,
+                    stop_event=self.stop_event,
+                    progress=lambda i, n, cur: self.q.put(("progress", "自動分圖層", i, n, cur)),
+                    log=lambda level, message: self.q.put(("log", level, message)),
+                )
+            except Exception as exc:  # noqa: BLE001
+                result = dict(dwg=0, ok=0, failed=0, skipped=0, warnings=0, moved=0, created=0,
+                              unchanged=0, stopped=False, fatal=f"{type(exc).__name__}: {exc}",
+                              failed_files=[], notes=[], elapsed=0)
+                common.log_error({"output_dir": dst}, f"layerclass crashed: {result['fatal']}")
+            self.q.put(("layer_done", result))
+
+        self.worker = threading.Thread(target=work, daemon=True)
+        self.worker.start()
+        self._set_busy_ui(True)
+
+    def _on_layer_done(self, result):
+        self.summary = result
+        self.worker = None
+        self._can_stop = False
+        self._set_busy_ui(False)
+        if result.get("dwg", 0) == 0 and not result.get("fatal") and not result.get("stopped"):
+            state, verdict = "warning", "沒有找到 DWG"
+        else:
+            state, verdict = classify_outcome(result)
+        failed_files = result.get("failed_files", [])
+        shown = "\n".join(f"  - {friendly_failure(x)}" for x in failed_files[:8])
+        if len(failed_files) > 8:
+            shown += f"\n  ... 另有 {len(failed_files) - 8} 個（見 errors.log）"
+        st = STATE[state]
+        self.v_result.set(
+            f"{st['symbol']} {st['label']}：{verdict}\n"
+            f"DWG：{result.get('dwg', 0)}　成功：{result.get('ok', 0)}　"
+            f"失敗：{result.get('failed', 0)}　略過：{result.get('skipped', 0)}\n"
+            f"搬移數量：{result.get('moved', 0)}　新建圖層：{result.get('created', 0)}　"
+            f"無變更：{result.get('unchanged', 0)}\n"
+            f"結果：logs/layerclass_moves.csv"
+            + (f"\n錯誤：{result['fatal']}" if result.get("fatal") else "")
+            + (f"\n\n失敗檔案：\n{shown}" if failed_files else "")
+        )
+        self._set_status(state, verdict)
+        if not result.get("fatal") and not result.get("stopped"):
+            self.v_progress.set(100)
+        self._refresh_analysis_outputs()
+        self._reveal(self.result_frame)
+
     # ---------- run ----------
     def _busy(self):
         return self.worker is not None and self.worker.is_alive()
@@ -963,6 +1130,8 @@ class App:
                     self._analysis_done(m[1])
                 elif k == "fontfix_done":
                     self._on_fontfix_done(m[1])
+                elif k == "layer_done":
+                    self._on_layer_done(m[1])
                 elif k == "env_paths":
                     self._on_env_paths(m[1], m[2])
                 elif k == "env":
