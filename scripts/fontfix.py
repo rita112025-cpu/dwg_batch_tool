@@ -262,10 +262,21 @@ def directory_problem(input_dir, output_dir):
     return "輸出資料夾不可放在輸入資料夾裡面"
 
 
-def iter_dwgs(folder, recursive):
+# Missing-font repair accepts drawing templates as well as drawings.
+# Layer classification and text modes keep the iter_dwgs default (.dwg only).
+FONTFIX_SUFFIXES = (".dwg", ".dwt")
+
+
+def iter_dwgs(folder, recursive, suffixes=(".dwg",)):
+    """Drawing files in ``folder``, or below it when ``recursive``.
+
+    Suffixes are compared case-insensitively. The default remains ``.dwg`` so
+    callers other than font-fix do not start reading templates.
+    """
     folder = Path(folder)
+    allowed = {str(suffix).lower() for suffix in suffixes}
     walker = folder.rglob("*") if recursive else folder.glob("*")
-    found = [p for p in walker if p.is_file() and p.suffix.lower() == ".dwg"]
+    found = [p for p in walker if p.is_file() and p.suffix.lower() in allowed]
     return sorted(found, key=lambda p: os.path.normcase(str(p)))
 
 

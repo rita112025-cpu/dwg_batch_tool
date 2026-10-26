@@ -159,6 +159,28 @@ def test_folder_listing_mirrors_subfolders_and_ignores_case(tmp_path):
     assert fontfix.output_for(both[0], src, tmp_path / "out", False) == tmp_path / "out" / "A.DWG"
 
 
+def test_fontfix_listing_includes_dwt_but_other_modes_stay_on_dwg(tmp_path):
+    src = tmp_path / "in"
+    (src / "sub").mkdir(parents=True)
+    _dwg(src / "A.DWG")
+    _dwg(src / "Template.DWT")
+    _dwg(src / "sub" / "arch.dwt")
+    (src / "note.txt").write_text("x", encoding="utf-8")
+    (src / "skip.dxf").write_bytes(HEADER)
+    (src / "backup.dwt.bak").write_bytes(HEADER)
+    assert [p.name for p in fontfix.iter_dwgs(src, recursive=True)] == ["A.DWG"]
+    found = fontfix.iter_dwgs(src, True, fontfix.FONTFIX_SUFFIXES)
+    assert {p.name for p in found} == {"A.DWG", "Template.DWT", "arch.dwt"}
+    assert [os.path.normcase(str(p)) for p in found] == sorted(
+        os.path.normcase(str(p)) for p in found
+    )
+    by_name = {p.name: p for p in found}
+    out = tmp_path / "out"
+    assert fontfix.output_for(by_name["Template.DWT"], src, out, True) == out / "Template.DWT"
+    assert fontfix.output_for(by_name["arch.dwt"], src, out, True) == out / "sub" / "arch.dwt"
+    assert fontfix.output_for(by_name["Template.DWT"], src, out, False).name == "Template.DWT"
+
+
 # ---------------------------------------------------------------------------
 # Generated LISP / script
 # ---------------------------------------------------------------------------
@@ -416,16 +438,95 @@ def test_batch_copies_chinese_paths_and_leaves_the_source_alone(tmp_path):
     assert seen and seen[-1][0] == 2 and seen[-1][1] == 2
 
 
+def test_dwt_is_repaired_as_dwt_and_source_is_untouched(tmp_path, monkeypatch):
+    src = tmp_path / "輸入"
+    (src / "子").mkdir(parents=True)
+    upper = src / "樣板.DWT"
+    lower = src / "子" / "arch.dwt"
+    drawing = src / "圖.DWG"
+    _dwg(upper, extra=b"UPPER")
+    _dwg(lower, extra=b"LOWER")
+    _dwg(drawing, extra=b"DWG")
+    (src / "說明.txt").write_text("不是圖", encoding="utf-8")
+    before = {path: _sha(path) for path in (upper, lower, drawing)}
+    seen = {}
+    real_build = fontfix.build_script
+
+    def capture(jobs, lisp_path):
+        seen["jobs"] = [
+            {"spath": job.get("spath", ""), "save_path": job.get("save_path", "")}
+            for job in jobs
+        ]
+        return real_build(jobs, lisp_path)
+
+    monkeypatch.setattr(fontfix, "build_script", capture)
+    dst = tmp_path / "輸出"
+    summary = _run(src, dst, recursive=True)
+    assert summary["fatal"] == ""
+    assert (summary["dwg"], summary["ok"], summary["failed"], summary["skipped"]) == (3, 3, 0, 0)
+    for origin, digest in before.items():
+        assert _sha(origin) == digest
+        assert origin.read_bytes()[:6] == b"AC1032"
+    assert (dst / "樣板.DWT").is_file()
+    assert (dst / "子" / "arch.dwt").is_file()
+    assert (dst / "圖.DWG").is_file()
+    assert not (dst / "樣板.dwg").exists()
+    assert not (dst / "子" / "arch.dwg").exists()
+    assert (dst / "樣板.DWT").read_bytes()[:6] == b"AC1032"
+    assert (dst / "子" / "arch.dwt").suffix == ".dwt"
+    assert seen["jobs"]
+    assert all(job["spath"].lower().endswith(".dwg") for job in seen["jobs"])
+    assert all(not job["spath"].lower().endswith(".dwt") for job in seen["jobs"])
+    with (dst / "logs" / "fontfix_results.csv").open(encoding="utf-8-sig", newline="") as fh:
+        rows = list(csv.DictReader(fh))
+    outputs = {row["輸出"] for row in rows}
+    assert any(path.endswith("樣板.DWT") for path in outputs)
+    assert any(path.endswith("arch.dwt") for path in outputs)
+    written = (dst / "樣板.DWT").read_bytes()
+    second = _run(src, dst, recursive=True, overwrite=False)
+    assert second["skipped"] == 3 and second["ok"] == 0
+    assert (dst / "樣板.DWT").read_bytes() == written
+    assert _sha(upper) == before[upper]
+    third = _run(src, dst, recursive=True, overwrite=True, version="2013")
+    assert third["ok"] == 3 and third["failed"] == 0
+    assert (dst / "樣板.DWT").read_bytes().endswith(b"\nSAVEAS")
+    assert (dst / "子" / "arch.dwt").read_bytes().endswith(b"\nSAVEAS")
+    assert not (dst / "樣板.dwg").exists()
+    assert _sha(upper) == before[upper]
+    assert _sha(lower) == before[lower]
+
+
+def test_refuses_to_publish_a_dwt_onto_its_source(tmp_path, monkeypatch):
+    src = tmp_path / "in"
+    template = src / "arch.DWT"
+    _dwg(template, extra=b"ORIGINAL")
+    digest = _sha(template)
+    monkeypatch.setattr(fontfix, "output_for", lambda *args, **kwargs: template)
+    summary = _run(src, tmp_path / "out", recursive=False, overwrite=True)
+    assert summary["ok"] == 0 and summary["failed"] == 1
+    assert "覆寫" in summary["failed_files"][0]
+    assert _sha(template) == digest
+    assert template.read_bytes().endswith(b"ORIGINAL")
+    assert not (tmp_path / "out" / "arch.DWT").exists()
+    assert not (tmp_path / "out" / "arch.dwg").exists()
+
+
 def test_flat_output_when_subfolders_are_off(tmp_path):
     src = tmp_path / "in"
     (src / "sub").mkdir(parents=True)
     _dwg(src / "only.dwg")
+    _dwg(src / "top.DWT")
     _dwg(src / "sub" / "skip.dwg")
+    _dwg(src / "sub" / "skip.dwt")
+    digest = _sha(src / "top.DWT")
     dst = tmp_path / "out"
     summary = _run(src, dst, recursive=False)
-    assert summary["dwg"] == 1 and summary["ok"] == 1
+    assert summary["dwg"] == 2 and summary["ok"] == 2
     assert (dst / "only.dwg").is_file()
+    assert (dst / "top.DWT").is_file()
+    assert not (dst / "top.dwg").exists()
     assert not (dst / "sub").exists()
+    assert _sha(src / "top.DWT") == digest
 
 
 def test_readonly_source_is_not_modified(tmp_path):
@@ -533,6 +634,19 @@ def test_fontfix_mode_widgets_and_same_folder_guard(monkeypatch, tk_root, tmp_pa
     app.v_mode.set("fontfix")
     app._refresh_mode_ui()
     assert app.mode_frames["fontfix"].winfo_manager()
+    labels = []
+
+    def _collect(widget):
+        try:
+            labels.append(widget.cget("text"))
+        except Exception:
+            pass
+        for child in widget.winfo_children():
+            _collect(child)
+
+    _collect(app.mode_frames["fontfix"])
+    assert any("DWT" in text and "不會修改原始圖檔" in text for text in labels)
+    assert any(text == "覆寫既有的輸出 DWG / DWT" for text in labels)
     assert sum(bool(frame.winfo_manager()) for frame in app.mode_frames.values()) == 1
     assert app.v_ff_primary.get() == "romans.shx"
     assert app.v_ff_big.get() == "chineset.shx"
@@ -576,7 +690,13 @@ def test_fontfix_mode_widgets_and_same_folder_guard(monkeypatch, tk_root, tmp_pa
     assert calls["kwargs"]["version"] == ""
     assert calls["kwargs"]["primary"] == "romans.shx"
     assert "成功" in app.v_result.get()
+    assert "DWG/DWT：" in app.v_result.get()
     assert str(app.btn_fontfix["state"]) == "normal"
+    app._on_fontfix_done(dict(
+        dwg=0, ok=0, failed=0, skipped=0, warnings=0, styles_replaced=0,
+        stopped=False, fatal="", failed_files=[], still_files=[],
+    ))
+    assert "沒有找到 DWG 或 DWT" in app.v_result.get()
 
 
 # ---------------------------------------------------------------------------
