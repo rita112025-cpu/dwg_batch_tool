@@ -478,7 +478,7 @@ def build_lisp(primary, big, mapping, typefaces, font_dirs):
   (setq s (ff-str s) i 1 n (strlen s) out "")
   (while (<= i n)
     (setq ch (substr s i 1))
-    (if (or (= ch (chr 9)) (= ch (chr 10)) (= ch (chr 13)))
+    (if (or (= ch "|") (= ch (chr 9)) (= ch (chr 10)) (= ch (chr 13)))
       (setq out (strcat out " "))
       (setq out (strcat out ch)))
     (setq i (1+ i)))
@@ -512,9 +512,9 @@ def build_lisp(primary, big, mapping, typefaces, font_dirs):
     (progn
       (setq ok (entmod ned))
       (if ok
-        (ff-emit (strcat "FONTFIX_REPLACED\\t" name "\\t" (ff-clean pf) "\\t" (ff-clean newpf)
-                         "\\t" (ff-clean bf) "\\t" (ff-clean newbf)))
-        (ff-emit (strcat "FONTFIX_ERROR\\t" name " entmod failed")))))
+        (ff-emit (strcat "FONTFIX_REPLACED|" name "|" (ff-clean pf) "|" (ff-clean newpf)
+                         "|" (ff-clean bf) "|" (ff-clean newbf)))
+        (ff-emit (strcat "FONTFIX_ERROR|" name " entmod failed")))))
   (if ok T nil))
 
 (defun ff-verify (/ rec en ed name pf bf n)
@@ -528,7 +528,7 @@ def build_lisp(primary, big, mapping, typefaces, font_dirs):
     (if (or (ff-missing-p pf) (ff-missing-p bf))
       (progn
         (setq n (1+ n))
-        (ff-emit (strcat "FONTFIX_STILL\\t" name "\\t" (ff-clean pf) "\\t" (ff-clean bf)))))
+        (ff-emit (strcat "FONTFIX_STILL|" name "|" (ff-clean pf) "|" (ff-clean bf)))))
     (setq rec (tblnext "STYLE")))
   n)
 
@@ -537,14 +537,14 @@ def build_lisp(primary, big, mapping, typefaces, font_dirs):
         names (ff-collect)
         n 0)
   (defun *error* (msg)
-    (ff-emit (strcat "FONTFIX_ERROR\\t" (ff-clean msg)))
-    (ff-emit "FONTFIX_SUMMARY\\t0\\t0")
+    (ff-emit (strcat "FONTFIX_ERROR|" (ff-clean msg)))
+    (ff-emit "FONTFIX_SUMMARY|0|0")
     (setq *error* olderr)
     (princ))
   (foreach en names
     (if (ff-fix-one en) (setq n (1+ n))))
   (setq still (ff-verify))
-  (ff-emit (strcat "FONTFIX_SUMMARY\\t" (itoa n) "\\t" (itoa still)))
+  (ff-emit (strcat "FONTFIX_SUMMARY|" (itoa n) "|" (itoa still)))
   (setq *error* olderr)
   (princ))
 
@@ -606,7 +606,7 @@ def build_script(jobs, lisp_path):
         )
         lines.append(
             '(if (and (boundp \'ff-fix-current) ff-fix-current) '
-            '(ff-fix-current) (princ (strcat "\\nFONTFIX_" "ERROR\\tlisp not loaded\\n")))'
+            '(ff-fix-current) (princ (strcat "\\nFONTFIX_" "ERROR|lisp not loaded\\n")))'
         )
         if job.get("save_version"):
             lines.append("_.SAVEAS")
@@ -621,12 +621,13 @@ def build_script(jobs, lisp_path):
     return text
 
 
+# Fields are separated by "|": accoreconsole's console turns a tab into spaces, so tabs cannot be parsed.
 _REPLACED = __import__("re").compile(
-    r"FONTFIX_REPLACED\t([^\t\r\n]*)\t([^\t\r\n]*)\t([^\t\r\n]*)\t([^\t\r\n]*)\t([^\t\r\n]*)"
+    r"FONTFIX_REPLACED\|([^|\r\n]*)\|([^|\r\n]*)\|([^|\r\n]*)\|([^|\r\n]*)\|([^|\r\n]*)"
 )
-_STILL = __import__("re").compile(r"FONTFIX_STILL\t([^\t\r\n]*)\t([^\t\r\n]*)\t([^\t\r\n]*)")
-_SUMMARY = __import__("re").compile(r"FONTFIX_SUMMARY\t(\d+)\t(\d+)")
-_ERROR = __import__("re").compile(r"FONTFIX_ERROR\t([^\r\n]*)")
+_STILL = __import__("re").compile(r"FONTFIX_STILL\|([^|\r\n]*)\|([^|\r\n]*)\|([^|\r\n]*)")
+_SUMMARY = __import__("re").compile(r"FONTFIX_SUMMARY\|(\d+)\|(\d+)")
+_ERROR = __import__("re").compile(r"FONTFIX_ERROR\|([^\r\n]*)")
 _READY = __import__("re").compile(r"FONTFIX_READY")
 
 
