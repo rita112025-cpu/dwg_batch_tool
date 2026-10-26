@@ -28,6 +28,93 @@ def _fresh(root):
         w.destroy()
 
 
+def test_mode_defaults_and_environment_gating(monkeypatch, tk_root):
+    import app as appmod
+    monkeypatch.setattr(appmod.App, "_check_env", lambda self: None)
+    _fresh(tk_root)
+    a = appmod.App(tk_root)
+    assert a.v_mode.get() == "version"
+    assert str(a.btn_versions["state"]) == "normal"       # version headers do not need AutoCAD
+    assert not a.env_ok and str(a.btn_start["state"]) == "disabled"
+    assert not a.env_details.winfo_manager()
+    assert not a.kw_frame.winfo_manager()
+    assert not a.more_results.winfo_manager()
+    assert a.log_frame.winfo_manager()
+    a._toggle_env_details()
+    assert a.env_details.winfo_manager()
+    a._toggle_env_details()
+    assert not a.env_details.winfo_manager()
+    a._toggle_log()
+    assert not a.log_frame.winfo_manager()
+    a._toggle_log()
+    assert a.log_frame.winfo_manager()
+    original_convert = a.opts["convert"].get()
+    original_keywords = a._keywords()
+    for mode in ("scan", "analysis", "version", "fontfix", "layerclass", "textextract", "textreplace", "dwg"):
+        a.v_mode.set(mode)
+        a._refresh_mode_ui()
+        assert a.mode_frames[mode].winfo_manager()
+        assert sum(bool(frame.winfo_manager()) for frame in a.mode_frames.values()) == 1
+    assert a.opts["convert"].get() == original_convert
+    assert a._keywords() == original_keywords
+    a.v_mode.set("dwg")
+    a._refresh_mode_ui()
+    assert str(a.btn_start["state"]) == "disabled"        # DWG conversion does need accoreconsole
+    a._toggle_keywords()
+    assert a.kw_frame.winfo_manager()
+    a._toggle_keywords()
+    assert not a.kw_frame.winfo_manager()
+    a._toggle_more_results()
+    assert a.more_results.winfo_manager()
+    a._toggle_more_results()
+    assert not a.more_results.winfo_manager()
+    a.v_mode.set("analysis")
+    a._refresh_mode_ui()
+    assert str(a.btn_analysis["state"]) == "normal"       # non-DWG analysis stays available
+
+
+def test_primary_result_selection(tmp_path):
+    import app as appmod
+    out = tmp_path / "out"
+    (out / "csv").mkdir(parents=True)
+    (out / "cross_reference").mkdir()
+    (out / "database").mkdir()
+
+    versions = out / "csv" / "dwg_versions.csv"
+    versions.touch()
+    assert appmod.get_primary_result("version", out) == versions
+
+    file_index = out / "csv" / "file_index.csv"
+    file_index.touch()
+    assert appmod.get_primary_result("dwg", out) == file_index
+    scada = out / "csv" / "scada_hits.csv"
+    scada.touch()
+    assert appmod.get_primary_result("dwg", out) == scada
+
+    fontfix_csv = out / "logs" / "fontfix_results.csv"
+    fontfix_csv.parent.mkdir(parents=True, exist_ok=True)
+    fontfix_csv.touch()
+    assert appmod.get_primary_result("fontfix", out) == fontfix_csv
+
+    hits = out / "logs" / "textextract_hits.csv"
+    hits.touch()
+    assert appmod.get_primary_result("textextract", out) == hits
+    changes = out / "logs" / "textreplace_changes.csv"
+    changes.touch()
+    assert appmod.get_primary_result("textreplace", out) == changes
+    moves = out / "logs" / "layerclass_moves.csv"
+    moves.touch()
+    assert appmod.get_primary_result("layerclass", out) == moves
+
+    project_db = out / "database" / "project.db"
+    project_db.touch()
+    assert appmod.get_primary_result("analysis", out) == project_db
+    cross_reference = out / "cross_reference" / "cross_reference.csv"
+    cross_reference.touch()
+    assert appmod.get_primary_result("analysis", out) == cross_reference
+    assert appmod.get_primary_result("scan", out) is None
+
+
 @pytest.fixture
 def env(tmp_path):
     inp = tmp_path / "測試 資料"          # Chinese + space, as required

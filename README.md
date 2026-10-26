@@ -5,7 +5,7 @@
 
 | 項目 | 狀態 |
 | --- | --- |
-| 自動化測試 | 219/219 tests PASS |
+| 自動化測試 | 276 collected。無 AutoCAD 的環境為 254 passed / 22 skipped（含缺字體修復、自動分圖層、文字擷取／取代；`accore` 測試在 AutoCAD 2027 上才會執行） |
 | Real project validation | SB12 Round 1 FAIL（v1.5）→ Round 2 PASS（P0 修正，v1.5.1）→ Round 3 PASS（P1 evidence metadata，v1.5.2）；見 [docs/REAL_PROJECT_VALIDATION_STATUS.md](docs/REAL_PROJECT_VALIDATION_STATUS.md) |
 | Production Approval | NOT APPROVED |
 | 版本標籤 | `v1.6.0`（前版 `v1.5.2`、`v1.5.1`、`v1.5-semantic-validation-candidate`） |
@@ -55,6 +55,128 @@ tkinter 介面：選輸入/輸出資料夾、勾選處理選項、編輯關鍵�
 處理在背景 thread 執行，UI 只透過 Queue 更新；「停止」只會終止本程式自己啟動的 accoreconsole。
 GUI log 寫入 `output\logs\gui.log`。掃描不會執行 AutoCAD、不修改任何檔案。
 「產生 CSV」控制 analyze 的 CSV；`scada_hits.csv` 只要勾選「SCADA 關鍵字搜尋」就會產生。
+
+### DWG / DWT 版本表（免 AutoCAD、免管理員）
+來源區的「產生 DWG/DWT 版本表」會直接唯讀檔案前 6 bytes 的 `ACxxxx` header，輸出 `output/csv/dwg_versions.csv`。
+- 支援 `.dwg` 與 `.dwt`；DWT 使用相同的 DWG header 判讀方式。
+- 不啟動 AutoCAD、不安裝 Shell Extension、不寫 Windows Registry、不需要系統管理員權限。
+- 欄位：`file`、`extension`、`format_code`、`format`、`status`。
+- `format` 直接以「`ACxxxx`→西元年」顯示，一眼看懂版本與年份；例如 `AC1032` 顯示為 `AC1032→2018`。
+- 未知的新 `ACxxxx` 代碼會保留原碼並標記 `UNKNOWN_CODE`，不會猜測版本。
+
+### 缺字體修復
+「② 我要做什麼？」選擇「缺字體修復」。使用上方的輸入／輸出資料夾（兩者不可相同，輸出也不可放在輸入裡面），按「開始修復字體」。
+每個 DWG 會先整檔複製到暫存檔再交給 `accoreconsole` 開啟，所以原始圖不會被改寫；正在 AutoCAD 裡開啟的圖只要還能讀取，也會用複本處理。勾選「包含子資料夾」時，輸出保留相同的資料夾結構。
+
+替換規則與已在 AutoCAD 2027 驗證過的 FONTFIX 原型相同：
+- 逐一讀取文字樣式的主字體（DXF group 3）與大字體（DXF group 4）。
+- 字體算「找不到」必須同時失敗：AutoCAD 支援路徑（`findfile`）、`%WINDIR%\Fonts`、`%LOCALAPPDATA%\Microsoft\Windows\Fonts`，以及（`.ttf/.ttc/.otf`）登錄的 TrueType 字型名稱。AutoCAD 會把已安裝字型記成 `Microsoft JhengHei.ttf`，實際檔案卻是 `msjh.ttc`，所以不能只比檔名。
+- 沒有副檔名（例如 `txt`、`genie`）當成 `.shx`。`@` 開頭的直排字體略過。
+- 找不到的主字體改成預設主字體（預設 `romans.shx`），找不到的大字體改成預設大字體（預設 `chineset.shx`）。「字體對照」可寫 `舊字體=新字體`，每行一筆，大小寫不分。已安裝的字體不動。
+- 存檔前再檢查一次，仍然找不到的樣式寫進結果。
+
+結果在輸出資料夾的 `logs\`：
+- `fontfix_results.csv`：每個 DWG 一列（檔案、狀態、替換明細、仍缺字、錯誤）。
+- `fontfix_results.jsonl`：同一批結果的結構化內容。
+- `fontfix.log`：繁中文字紀錄（替換了哪個樣式、舊字體、新字體）。
+- `fontfix_batch_*.stdout.log`：該次 accoreconsole 的主控台輸出。
+
+「另存版本」預設「維持目前格式」（`QSAVE`，不改 DWG 版本）。選 2018／2013／2010／2007／2004／2000／R14 時改走 `SAVEAS` 的格式關鍵字。這個版本切換在沒有 AutoCAD 的環境無法執行，請在本機 AutoCAD 2027 用下方步驟確認。
+
+實作取捨：accoreconsole 不能穩定使用 COM／ObjectDBX，所以樣式是用 AutoLISP `entmod` 改 STYLE 表，而不是原型裡的 ActiveX。TrueType 字型名稱由 Python 讀登錄後寫進 UTF-8（含 BOM）的 LISP；`findfile` 與 Windows 字型資料夾仍在 AutoCAD 裡檢查。批次開始前會把 `FONTALT` 設成 `txt.shx`，只為了避免缺字對話框卡住主控台，不會改寫樣式表。`XREF|樣式` 這類被鎖住的外部參考樣式若 `entmod` 被拒絕，會出現在「仍缺字」或錯誤欄，不會改到外部參考的來源檔。
+
+修復結果用 `|=|` 分隔欄位。accoreconsole 會把 LISP 印出的定位字元（tab）展開成不定數量的空白，空的大字體欄位會消失，含空白的字型名稱（例如 `Microsoft JhengHei.ttf`）也會被切碎。用定位字元解析時，三張圖都會變成「沒有收到修復結果」，暫存 DWG 也不會搬進輸出資料夾。解析器仍讀得懂舊的定位字元，以及這次實測留下的空白分隔輸出。
+
+本機確認（Windows、AutoCAD 2027，不是 LT）：
+1. 選「缺字體修復」，輸入資料夾放含缺字 SHX 的 DWG，輸出選另一個資料夾。可讓其中一個 DWG 維持在 AutoCAD 開啟。
+2. 維持預設 `romans.shx`／`chineset.shx`，可加一筆對照（例如 `sino2.shx=txt.shx`），勾選子資料夾後開始。
+3. 進度會逐檔前進。原始檔時間與內容不變，被開啟的那張圖也沒被存回。
+4. 輸出的 DWG 在 AutoCAD 2027（zh-TW）打開時，被替換的樣式不再跳缺字；`Microsoft JhengHei.ttf`、`arial.ttf`、`txt` 與 `@` 開頭的樣式維持原樣。
+5. `logs\fontfix_results.csv` 與 `fontfix.log` 有舊字體 → 新字體，以及存檔後仍缺字的樣式。
+6. 「另存版本」選 AutoCAD 2013，再用「DWG / DWT 版本表」確認該檔是 `AC1027→2013`。
+7. 處理中按「停止」，批次會在目前檔案後停下，已完成的輸出保留。
+
+### 文字擷取
+「② 我要做什麼？」選擇「文字擷取」。使用上方的輸入／輸出資料夾（兩者不可相同，輸出也不可放在輸入裡面），輸入搜尋文字後按「開始擷取文字」。
+
+這個模式只讀圖，不輸出 DWG，也不修改原始圖檔。每個 DWG 先複製到暫存檔再交給 `accoreconsole`，所以正在 AutoCAD 裡開啟的圖只要還能讀取，也會用複本處理。
+
+AutoLISP 沒有正規表示式。LISP 只負責走訪文字並印出清單，Python 再套用規則：
+- 物件：`TEXT`、`MTEXT`、`ATTRIB`、`ATTDEF`。模型空間與紙空間配置都掃。`ATTRIB` 若掛在圖塊插入上，會帶該圖塊名稱。
+- 「包含圖塊定義裡的文字」預設關閉。打開後才會走圖塊定義（含匿名圖塊），座標是圖塊內部座標，空間欄位寫「圖塊定義」。取代模式也預設關閉，避免一改定義就改到每一個插入。
+- 比對方式：包含文字、萬用字元（`*` 與 `?`，比對整段文字）、正規表示式。預設不區分大小寫。
+- `MTEXT` 先去掉格式碼再比對（`\H`、`\C`、`\f`、顏色與大括號等）。堆疊分數 `\S...;` 與欄位碼裡的文字不納入比對。
+
+結果在輸出資料夾的 `logs\`（CSV 為 UTF-8 含 BOM，Excel 可直接開中文）：
+- `textextract_hits.csv`：一筆符合一列。欄位為檔案、空間/版面、圖層、物件類型、圖塊名稱、文字內容、符合部分、X、Y、handle。
+- `textextract_results.csv`：每個 DWG 一列（狀態、符合筆數）。沒有符合的檔案狀態是「無符合」，仍算成功。
+- `textextract.log`、`textextract_batch_*.stdout.log`。
+
+### 文字取代
+「② 我要做什麼？」選擇「文字取代」。尋找／取代成可以是一般文字，或正規表示式（取代內容可用 `\1`、`\2`）。範例：尋找 `^(W\d+)\s.*$`、取代成 `\1`，會留下假梁編號、去掉後面的尺寸。
+
+修改只發生在暫存複本。有變更的 DWG 才寫進輸出資料夾；原始圖的時間與內容不變。
+- 「只產生變更清單，不輸出 DWG」是預覽。狀態為「預覽」，仍然寫出變更清單。
+- 沒有符合的檔案狀態是「無變更」，預設不複製。勾選「沒有變更的檔案也複製到輸出資料夾」才會複製。
+- 「把變更過的文字改成 ACI 色號」只改有動到的文字（0=BYBLOCK，256=BYLAYER）。沒勾就保持原色。
+- 已存在的輸出 DWG 會略過，除非勾選覆寫。
+
+結果：
+- `textreplace_changes.csv`：檔案、圖層、物件類型、handle、原文字、新文字、次數。
+- `textreplace_results.csv`：每個 DWG 的狀態與變更筆數。
+- `textreplace.log`，以及擷取與寫回各一份 `textreplace*_batch_*.stdout.log`。
+
+MTEXT 會把新的純文字嵌回原本的格式碼，所以沒改到的字仍保留字高與字型。若格式碼對不回去（例如取代碰到堆疊分數），就改寫成已跳脫的純文字，狀態仍是「已輸出」或「預覽」，錯誤欄與 log 會寫「MTEXT 格式碼無法完整保留」。`TEXT` 的 DXF 文字約 250 字一個群組，較長的結果會切段寫回。多行 `ATTRIB` 只處理群組 1。
+
+不在範圍內：標註文字、引線、表格、外部參考裡的文字、欄位碼的計算結果。`FONTALT` 只設成 `txt.shx` 以避免缺字對話框，不會改文字樣式。版本維持 `QSAVE` 的目前格式。
+
+本機確認（Windows、AutoCAD 2027，不是 LT）：
+1. `git pull` 這個分支後，選「文字擷取」，搜尋一段已知的梁編號或中文註解。
+2. 開啟 `logs\textextract_hits.csv`，核對空間、圖層、圖塊名稱與座標。原始 DWG 的修改時間不變。
+3. 選「文字取代」，用上面的 `^(W\d+)\s.*$` → `\1`，先勾「只產生變更清單」。確認沒有輸出 DWG，變更清單的新文字只剩編號。
+4. 取消預覽再跑一次。輸出 DWG 用 AutoCAD 打開，被改的 MTEXT 仍保留字高；沒有符合的檔不會出現在輸出，除非有勾複製。
+5. 讓其中一個 DWG 維持在 AutoCAD 開啟，再跑一次，原始檔仍不被存回。
+
+### 自動分圖層
+「② 我要做什麼？」選擇「自動分圖層」。圖檔常常整張都在圖層 0。這個模式依物件類型把實體搬到對應圖層，使用和缺字體修復相同的 accoreconsole 批次、輸出資料夾、`logs\`、`|=|` 結果列與暫存複本。原始圖檔不會被改寫；正在 AutoCAD 裡開啟的圖只要還能讀取，也會用複本處理。
+
+預設對照（可在畫面裡改，圖層名稱空白表示不搬該類型）：
+- `LWPOLYLINE`、`POLYLINE` → `PL`
+- `TEXT`、`MTEXT` → `TST`
+- `HATCH` → `H`
+- `LINE` → `LINE`，`ARC` → `ARC`，`CIRCLE` → `CIRCLE`
+- `DIMENSION` → `DIM`，`LEADER` 與 `MULTILEADER` → `LEAD`（對照表寫 `MLEADER` 也會當成 `MULTILEADER`）
+- 圖塊 `INSERT` 預設搬到「圖塊有效名稱」的圖層，不寫在對照表。動態圖塊用 `getpropertyvalue` 的 `EffectiveName`（AutoCAD 2012 以後的內建函數，不是 `vl-*`）。名稱仍是 `*U`、`*D` 這類匿名圖塊時，圖層名為 `ANON_` 加上去掉星號後的名稱（例如 `*U12` → `ANON_U12`）。
+- 「其他物件圖層」空白時，沒列在表上的類型（含 `ATTRIB`）留在原圖層。
+
+範圍，預設都偏保守：
+- 只處理目前在圖層 0 的實體。可改成指定來源圖層（逗號或空白分隔），或全部圖層。
+- 只處理模型空間。勾選「包含配置」才處理紙空間。
+- 圖塊定義裡的物件預設不改。勾選之後，定義裡的文字、線、巢狀圖塊都會搬層，每一個插入都會跟著變。沒有配置代碼的圖塊定義物件，在「只處理模型空間」時仍會處理。
+- 可加圖層前綴，例如 `A_` 會讓 `PL` 變成 `A_PL`、圖塊 `Door` 變成 `A_Door`。
+- 圖層名稱裡的 `<>/\:";?*|,=`、反引號與控制字元會換成 `_`。
+
+新圖層的顏色依建立順序循環 ACI 1 到 9。已經存在的圖層不改顏色、不改鎖、不改線型。CSV 的「新建圖層」是實體搬去的圖層名稱；「顏色」是該圖層目前的 ACI 色（新建的才是 1–9，舊圖層維持原色）。
+
+外觀：實體若是 BYLAYER（沒有顏色群組，或顏色 256）又搬到顏色不同的圖層，看起來會變。預設勾選「保持原外觀」：把 BYLAYER 的顏色與線型改成原圖層的明確值（圖層沒寫顏色時用 7，沒寫線型時用 Continuous）再搬層。已經是明確顏色、或 BYBLOCK（色號 0）的實體不會改。取消這個選項後，BYLAYER 會跟著新圖層的顏色走，方便用顏色檢查分類結果。
+
+鎖定圖層：預設略過其上的實體，並在結果的「鎖定圖層」欄寫 `圖層:略過`。勾選「暫時解鎖」會先解鎖、搬完再鎖回，欄位寫 `圖層:已暫時解鎖`。
+
+「只產生清單，不輸出 DWG」是預覽：仍寫 CSV，不寫 DWG，狀態為「預覽」。沒有實體要搬的檔案狀態是「無變更」，不複製。已存在的輸出 DWG 會略過，除非勾選覆寫。
+
+結果（CSV 為 UTF-8 含 BOM）：
+- `logs\layerclass_moves.csv`：全部檔案的明細。欄位為檔案、新建圖層、顏色、物件類型、搬移數量、來源圖層。
+- `logs\layerclass\<相對路徑>.csv`：每個 DWG 一份相同欄位的明細。
+- `logs\layerclass_results.csv`：每個 DWG 一列，含搬移數量、新建圖層數、鎖定圖層與狀態。`layerclass.log` 末行有合計搬移數。
+
+不在這個模式裡改的東西：外部參考的來源檔、圖塊定義（除非勾選）、沒列在對照表且沒填「其他物件圖層」的類型。`FONTALT` 只設成 `txt.shx` 以避免缺字對話框。存檔用 `QSAVE`，不改 DWG 版本。accoreconsole 會把定位字元展開成空白，所以結果用 `|=|`；解析器仍讀得懂每個欄位都是單字時的空白輸出。
+
+本機確認（Windows、AutoCAD 2027，不是 LT）：
+1. `git pull` 這個分支後，選「自動分圖層」。輸入資料夾放一張圖層 0 上什麼都有的 DWG，輸出選另一個資料夾。
+2. 先勾「只產生清單」。確認沒有輸出 DWG，`logs\layerclass_moves.csv` 的數量與類型合理。
+3. 取消預覽再跑。原始檔時間不變。輸出 DWG 裡聚合線在 `PL`、文字在 `TST`、填充在 `H`、圖塊在以圖塊名稱命名的圖層。新圖層顏色為 1–9，舊圖層顏色沒變。
+4. 取消「保持原外觀」再輸出到另一個資料夾，BYLAYER 的線應跟著新圖層變色；勾著時外觀應接近原圖。
+5. 放一個鎖住的圖層，沒勾解鎖時該層物件留在原地，結果列出略過的圖層；勾選後物件會搬走，圖層仍是鎖定。
 
 ### 桌面捷徑
 雙擊 `create_shortcut.bat` 會在桌面建立「DWG分析」捷徑（圖示為 `dwg_analysis.ico`）。
