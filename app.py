@@ -18,6 +18,8 @@ import pipeline  # noqa: E402
 import dwg_version  # noqa: E402
 import fontfix  # noqa: E402
 import fontfix_batch  # noqa: E402
+import dwgtext  # noqa: E402
+import textbatch  # noqa: E402
 import layerclass  # noqa: E402
 import layerbatch  # noqa: E402
 
@@ -53,6 +55,8 @@ LOG_FG = {"success": "#1B6E2C", "warning": "#8A5A00", "failed": "#B3261E"}      
 PRIMARY_RESULTS = {
     "version": ("csv/dwg_versions.csv",),
     "fontfix": ("logs/fontfix_results.csv",),
+    "textextract": ("logs/textextract_hits.csv",),
+    "textreplace": ("logs/textreplace_changes.csv",),
     "layerclass": ("logs/layerclass_moves.csv",),
     "dwg": ("csv/scada_hits.csv", "csv/file_index.csv"),
     "analysis": ("cross_reference/cross_reference.csv", "database/project.db"),
@@ -239,6 +243,7 @@ class App:
         self.mode_buttons = []
         modes = (("scan", "掃描資料夾"), ("version", "DWG / DWT 版本表"), ("fontfix", "缺字體修復"),
                  ("layerclass", "自動分圖層"),
+                 ("textextract", "文字擷取"), ("textreplace", "文字取代"),
                  ("dwg", "DWG 轉 DXF + 解析"), ("analysis", "工程資料分析"))
         for i, (value, text) in enumerate(modes):
             radio = ttk.Radiobutton(radio_row, text=text, value=value, variable=self.v_mode,
@@ -353,6 +358,84 @@ class App:
         self.ff_map_text.bind("<Shift-Tab>", lambda e: (e.widget.tk_focusPrev().focus_set(), "break")[1])
         self.btn_fontfix = ttk.Button(fontfix_box, text="開始修復字體", command=self._start_fontfix)
         self.btn_fontfix.pack(anchor="w", pady=(4, 0))
+
+        extract = ttk.Frame(self.mode_frame)
+        self.mode_frames["textextract"] = extract
+        ttk.Label(extract, text="文字擷取",
+                  font=(tkfont.nametofont("TkDefaultFont").actual("family"), 11)).pack(anchor="w")
+        ttk.Label(
+            extract,
+            text=("使用上方的輸入／輸出資料夾。只讀取 TEXT、MTEXT、ATTRIB、ATTDEF，不輸出 DWG、不修改原始圖檔。\n"
+                  "AutoLISP 沒有正規表示式，所以先把文字清單印出來，再由 Python 做包含、萬用字元或正規表示式比對。"),
+            justify="left", wraplength=760,
+        ).pack(anchor="w", pady=(2, 6))
+        ex_form = ttk.Frame(extract)
+        ex_form.pack(fill="x")
+        self.v_tx_pattern = tk.StringVar()
+        ttk.Label(ex_form, text="搜尋文字", width=12).grid(row=0, column=0, sticky="w", pady=2)
+        ttk.Entry(ex_form, textvariable=self.v_tx_pattern).grid(row=0, column=1, sticky="ew", pady=2)
+        ttk.Label(ex_form, text="比對方式", width=12).grid(row=1, column=0, sticky="w", pady=2)
+        self.tx_match_box = ttk.Combobox(
+            ex_form, state="readonly", width=24,
+            values=[label for _code, label in dwgtext.MATCH_MODES])
+        self.tx_match_box.grid(row=1, column=1, sticky="w", pady=2)
+        self.tx_match_box.current(0)
+        ex_form.columnconfigure(1, weight=1)
+        self.v_tx_case = tk.BooleanVar(value=False)
+        self.v_tx_blocks = tk.BooleanVar(value=False)
+        ttk.Checkbutton(extract, text="區分大小寫", variable=self.v_tx_case).pack(anchor="w")
+        ttk.Checkbutton(extract, text="包含圖塊定義裡的文字（座標是圖塊內部座標）",
+                        variable=self.v_tx_blocks).pack(anchor="w")
+        ttk.Checkbutton(extract, text="包含子資料夾", variable=self.opts["recursive"]).pack(anchor="w")
+        self.btn_extract = ttk.Button(extract, text="開始擷取文字", command=self._start_extract)
+        self.btn_extract.pack(anchor="w", pady=(8, 0))
+
+        replace = ttk.Frame(self.mode_frame)
+        self.mode_frames["textreplace"] = replace
+        ttk.Label(replace, text="文字取代",
+                  font=(tkfont.nametofont("TkDefaultFont").actual("family"), 11)).pack(anchor="w")
+        ttk.Label(
+            replace,
+            text=("每個 DWG 先複製到暫存檔再修改，原始圖檔不會被改寫。變更後的 DWG 寫到輸出資料夾。\n"
+                  "正規表示式的取代內容可用 \\1、\\2。範例：^(W\\d+)\\s.*$ 取代成 \\1，會留下假梁編號、去掉後面的尺寸。\n"
+                  "MTEXT 會盡量保留格式碼；保留不了時改寫成純文字，並記在結果的錯誤欄。"),
+            justify="left", wraplength=760,
+        ).pack(anchor="w", pady=(2, 6))
+        rp_form = ttk.Frame(replace)
+        rp_form.pack(fill="x")
+        self.v_rp_find = tk.StringVar()
+        self.v_rp_repl = tk.StringVar()
+        ttk.Label(rp_form, text="尋找", width=12).grid(row=0, column=0, sticky="w", pady=2)
+        ttk.Entry(rp_form, textvariable=self.v_rp_find).grid(row=0, column=1, sticky="ew", pady=2)
+        ttk.Label(rp_form, text="取代成", width=12).grid(row=1, column=0, sticky="w", pady=2)
+        ttk.Entry(rp_form, textvariable=self.v_rp_repl).grid(row=1, column=1, sticky="ew", pady=2)
+        ttk.Label(rp_form, text="比對方式", width=12).grid(row=2, column=0, sticky="w", pady=2)
+        self.rp_mode_box = ttk.Combobox(
+            rp_form, state="readonly", width=24,
+            values=[label for _code, label in dwgtext.REPLACE_MODES])
+        self.rp_mode_box.grid(row=2, column=1, sticky="w", pady=2)
+        self.rp_mode_box.current(0)
+        self.v_rp_color = tk.StringVar(value="1")
+        ttk.Label(rp_form, text="ACI 色號", width=12).grid(row=3, column=0, sticky="w", pady=2)
+        ttk.Entry(rp_form, textvariable=self.v_rp_color, width=8).grid(row=3, column=1, sticky="w", pady=2)
+        rp_form.columnconfigure(1, weight=1)
+        self.v_rp_case = tk.BooleanVar(value=False)
+        self.v_rp_blocks = tk.BooleanVar(value=False)
+        self.v_rp_recolor = tk.BooleanVar(value=False)
+        self.v_rp_dry = tk.BooleanVar(value=False)
+        self.v_rp_copy = tk.BooleanVar(value=False)
+        self.v_rp_overwrite = tk.BooleanVar(value=False)
+        ttk.Checkbutton(replace, text="區分大小寫", variable=self.v_rp_case).pack(anchor="w")
+        ttk.Checkbutton(replace, text="包含圖塊定義裡的文字", variable=self.v_rp_blocks).pack(anchor="w")
+        ttk.Checkbutton(replace, text="把變更過的文字改成上面的 ACI 色號（0=BYBLOCK，256=BYLAYER）",
+                        variable=self.v_rp_recolor).pack(anchor="w")
+        ttk.Checkbutton(replace, text="只產生變更清單，不輸出 DWG", variable=self.v_rp_dry).pack(anchor="w")
+        ttk.Checkbutton(replace, text="沒有變更的檔案也複製到輸出資料夾", variable=self.v_rp_copy).pack(anchor="w")
+        ttk.Checkbutton(replace, text="包含子資料夾（輸出保留相同的資料夾結構）",
+                        variable=self.opts["recursive"]).pack(anchor="w")
+        ttk.Checkbutton(replace, text="覆寫既有的輸出 DWG", variable=self.v_rp_overwrite).pack(anchor="w")
+        self.btn_replace = ttk.Button(replace, text="開始取代文字", command=self._start_replace)
+        self.btn_replace.pack(anchor="w", pady=(8, 0))
 
         layer_box = ttk.Frame(self.mode_frame)
         self.mode_frames["layerclass"] = layer_box
@@ -470,6 +553,12 @@ class App:
             ("共用", (("開啟 errors.log", "logs/errors.log"), ("開啟 dwg_versions.csv", "csv/dwg_versions.csv"))),
             ("缺字體修復", (("開啟 fontfix_results.csv", "logs/fontfix_results.csv"),
                        ("開啟 fontfix.log", "logs/fontfix.log"))),
+            ("文字擷取", (("開啟 textextract_hits.csv", "logs/textextract_hits.csv"),
+                      ("開啟 textextract_results.csv", "logs/textextract_results.csv"),
+                      ("開啟 textextract.log", "logs/textextract.log"))),
+            ("文字取代", (("開啟 textreplace_changes.csv", "logs/textreplace_changes.csv"),
+                      ("開啟 textreplace_results.csv", "logs/textreplace_results.csv"),
+                      ("開啟 textreplace.log", "logs/textreplace.log"))),
             ("自動分圖層", (("開啟 layerclass_moves.csv", "logs/layerclass_moves.csv"),
                        ("開啟 layerclass_results.csv", "logs/layerclass_results.csv"),
                        ("開啟 layerclass.log", "logs/layerclass.log"))),
@@ -579,11 +668,13 @@ class App:
         state = "disabled" if busy else "normal"
         for widget in (self.mode_buttons + self.browse_buttons +
                        [self.btn_scan, self.btn_versions, self.btn_analysis, self.btn_fontfix,
-                        self.btn_layer, self.btn_files, self.btn_folder, self.btn_recheck,
-                        self.btn_save_config]):
+                        self.btn_extract, self.btn_replace, self.btn_layer,
+                        self.btn_files, self.btn_folder, self.btn_recheck, self.btn_save_config]):
             widget.configure(state=state)
         self.btn_start.configure(state="normal" if not busy and self.env_ok else "disabled")
         self.btn_fontfix.configure(state="normal" if not busy and self.env_ok else "disabled")
+        self.btn_extract.configure(state="normal" if not busy and self.env_ok else "disabled")
+        self.btn_replace.configure(state="normal" if not busy and self.env_ok else "disabled")
         self.btn_layer.configure(state="normal" if not busy and self.env_ok else "disabled")
         cancellable = busy and self._can_stop
         self.btn_stop.configure(state="normal" if cancellable else "disabled")
@@ -942,6 +1033,183 @@ class App:
         self._refresh_analysis_outputs()
         self._reveal(self.result_frame)
 
+    def _combo_code(self, box, pairs):
+        label = box.get()
+        for code, text in pairs:
+            if text == label:
+                return code
+        return None
+
+    def _text_folders(self):
+        src = self.v_in.get().strip()
+        dst = self.v_out.get().strip()
+        problem = fontfix.directory_problem(src, dst)
+        if problem:
+            messagebox.showerror("路徑錯誤", problem)
+            return None
+        return src, dst
+
+    def _replace_color(self):
+        if not self.v_rp_recolor.get():
+            return None
+        raw = self.v_rp_color.get().strip()
+        if not raw.isdigit() or int(raw) > 256:
+            messagebox.showerror("色號錯誤", "ACI 色號必須是 0 到 256。")
+            return "bad"
+        return int(raw)
+
+    def _start_extract(self):
+        if self._busy():
+            return
+        if not self.env_ok:
+            messagebox.showerror("無法擷取文字", "找不到可用的 accoreconsole；請先完成環境設定並重新檢查。")
+            return
+        folders = self._text_folders()
+        if folders is None:
+            return
+        src, dst = folders
+        mode = self._combo_code(self.tx_match_box, dwgtext.MATCH_MODES)
+        problem = dwgtext.validate_rule(self.v_tx_pattern.get(), mode)
+        if problem:
+            messagebox.showerror("搜尋文字", problem)
+            return
+        pattern = self.v_tx_pattern.get()
+        case_sensitive = self.v_tx_case.get()
+        include_blocks = self.v_tx_blocks.get()
+        recursive = self.opts["recursive"].get()
+        timeout = int(self.cfg.get("timeout_seconds", 300))
+        accore = self.cfg.get("accoreconsole", "")
+        self.stop_event.clear()
+        self._can_stop = True
+        self.summary = None
+        self.v_progress.set(0)
+        self.v_ptext.set("")
+        self.v_current.set("")
+        self.v_result.set("擷取文字中...")
+        self._set_status("running", "文字擷取中…")
+
+        def work():
+            try:
+                result = textbatch.run_extract(
+                    src, dst, accore, pattern=pattern, mode=mode,
+                    case_sensitive=case_sensitive, include_blocks=include_blocks,
+                    recursive=recursive, timeout=timeout, stop_event=self.stop_event,
+                    progress=lambda i, n, cur: self.q.put(("progress", "文字擷取", i, n, cur)),
+                    log=lambda level, message: self.q.put(("log", level, message)),
+                )
+            except Exception as exc:  # noqa: BLE001
+                result = dict(dwg=0, ok=0, failed=0, skipped=0, warnings=0, hits=0,
+                              stopped=False, fatal=f"{type(exc).__name__}: {exc}",
+                              failed_files=[], elapsed=0)
+                common.log_error({"output_dir": dst}, f"textextract crashed: {result['fatal']}")
+            self.q.put(("extract_done", result))
+
+        self.worker = threading.Thread(target=work, daemon=True)
+        self.worker.start()
+        self._set_busy_ui(True)
+
+    def _on_text_done(self, result, title, detail_line, result_path):
+        self.summary = result
+        self.worker = None
+        self._can_stop = False
+        self._set_busy_ui(False)
+        if result.get("dwg", 0) == 0 and not result.get("fatal") and not result.get("stopped"):
+            state, verdict = "warning", "沒有找到 DWG"
+        else:
+            state, verdict = classify_outcome(result)
+        failed_files = result.get("failed_files", [])
+        shown = "\n".join(f"  - {friendly_failure(x)}" for x in failed_files[:8])
+        if len(failed_files) > 8:
+            shown += f"\n  ... 另有 {len(failed_files) - 8} 個（見 errors.log）"
+        st = STATE[state]
+        self.v_result.set(
+            f"{st['symbol']} {st['label']}：{verdict}\n"
+            f"DWG：{result.get('dwg', 0)}　成功：{result.get('ok', 0)}　"
+            f"失敗：{result.get('failed', 0)}　略過：{result.get('skipped', 0)}\n"
+            f"{detail_line}\n"
+            f"結果：{result_path}"
+            + (f"\n錯誤：{result['fatal']}" if result.get("fatal") else "")
+            + (f"\n\n失敗檔案：\n{shown}" if failed_files else "")
+        )
+        self._set_status(state, verdict)
+        if not result.get("fatal") and not result.get("stopped"):
+            self.v_progress.set(100)
+        self._refresh_analysis_outputs()
+        self._reveal(self.result_frame)
+
+    def _on_extract_done(self, result):
+        self._on_text_done(
+            result, "文字擷取",
+            f"符合筆數：{result.get('hits', 0)}",
+            "logs/textextract_hits.csv",
+        )
+
+    def _start_replace(self):
+        if self._busy():
+            return
+        if not self.env_ok:
+            messagebox.showerror("無法取代文字", "找不到可用的 accoreconsole；請先完成環境設定並重新檢查。")
+            return
+        folders = self._text_folders()
+        if folders is None:
+            return
+        color = self._replace_color()
+        if color == "bad":
+            return
+        mode = self._combo_code(self.rp_mode_box, dwgtext.REPLACE_MODES)
+        find = self.v_rp_find.get()
+        repl = self.v_rp_repl.get()
+        problem = dwgtext.validate_rule(find, mode, replacement=repl, for_replace=True)
+        if problem:
+            messagebox.showerror("取代規則", problem)
+            return
+        case_sensitive = self.v_rp_case.get()
+        include_blocks = self.v_rp_blocks.get()
+        dry_run = self.v_rp_dry.get()
+        copy_unchanged = self.v_rp_copy.get()
+        overwrite = self.v_rp_overwrite.get()
+        recursive = self.opts["recursive"].get()
+        timeout = int(self.cfg.get("timeout_seconds", 300))
+        accore = self.cfg.get("accoreconsole", "")
+        src, dst = folders
+        self.stop_event.clear()
+        self._can_stop = True
+        self.summary = None
+        self.v_progress.set(0)
+        self.v_ptext.set("")
+        self.v_current.set("")
+        self.v_result.set("預覽文字取代中..." if dry_run else "取代文字中...")
+        self._set_status("running", "文字取代預覽中…" if dry_run else "文字取代中…")
+
+        def work():
+            try:
+                result = textbatch.run_replace(
+                    src, dst, accore, find=find, repl=repl, mode=mode,
+                    case_sensitive=case_sensitive, include_blocks=include_blocks,
+                    color=color, dry_run=dry_run, copy_unchanged=copy_unchanged,
+                    recursive=recursive, overwrite=overwrite, timeout=timeout,
+                    stop_event=self.stop_event,
+                    progress=lambda i, n, cur: self.q.put(("progress", "文字取代", i, n, cur)),
+                    log=lambda level, message: self.q.put(("log", level, message)),
+                )
+            except Exception as exc:  # noqa: BLE001
+                result = dict(dwg=0, ok=0, failed=0, skipped=0, warnings=0, changes=0,
+                              unchanged=0, stopped=False, fatal=f"{type(exc).__name__}: {exc}",
+                              failed_files=[], elapsed=0)
+                common.log_error({"output_dir": dst}, f"textreplace crashed: {result['fatal']}")
+            self.q.put(("replace_done", result))
+
+        self.worker = threading.Thread(target=work, daemon=True)
+        self.worker.start()
+        self._set_busy_ui(True)
+
+    def _on_replace_done(self, result):
+        self._on_text_done(
+            result, "文字取代",
+            f"變更筆數：{result.get('changes', 0)}　無變更：{result.get('unchanged', 0)}",
+            "logs/textreplace_changes.csv",
+        )
+
     def _start_layerclass(self):
         if self._busy():
             return
@@ -1130,6 +1398,10 @@ class App:
                     self._analysis_done(m[1])
                 elif k == "fontfix_done":
                     self._on_fontfix_done(m[1])
+                elif k == "extract_done":
+                    self._on_extract_done(m[1])
+                elif k == "replace_done":
+                    self._on_replace_done(m[1])
                 elif k == "layer_done":
                     self._on_layer_done(m[1])
                 elif k == "env_paths":

@@ -26,11 +26,24 @@ _LAYER_DUMP = [
     "LAYERCLASS_READY",
 ]
 
+# Fixed dump the text-mode tests match against. The MTEXT body is the wire
+# form of {\H2.5;W12 400x200} (one backslash stored as two).
+_TEXT_DUMP = [
+    "TEXTDUMP|=|Model|=|S-BEAM|=|TEXT|=||=|W12 400x200|=|10.5|=|20.25|=|AB1|=|0",
+    "TEXTDUMP|=|Model|=|S-BEAM|=|MTEXT|=||=|{\\\\H2.5;W12 400x200}|=|1.0|=|2.0|=|AB2|=|1",
+    "TEXTDUMP|=|配置|=|A-NOTE|=|TEXT|=||=|備註|=|3|=|4|=|AB3|=|0",
+    "TEXTDUMP|=|圖塊定義|=|0|=|TEXT|=|TITLE|=|W99 300x100|=|0|=|0|=|BB1|=|0",
+    "TEXTDUMP_SUMMARY|=|4",
+    "TEXTDUMP_READY",
+]
+
 
 def _messages_for(script_text: str) -> list[str]:
     lines = script_text.splitlines()
+    text_dump = "tx-dump-current" in script_text
+    text_apply = "tx-apply-" in script_text
     layer_mode = "lc-run" in script_text
-    messages = [] if layer_mode else ["FONTFIX_READY"]
+    messages = [] if text_dump or text_apply or layer_mode else ["FONTFIX_READY"]
     pending = ""
     index = 0
     while index < len(lines):
@@ -52,7 +65,12 @@ def _messages_for(script_text: str) -> list[str]:
                 messages.append("invalid drawing")
                 messages.append("*" * 30)
                 break
-            if layer_mode:
+            if text_dump:
+                messages.extend(_TEXT_DUMP)
+            elif text_apply:
+                messages.append("TEXTAPPLY|=|AB1|=|ok")
+                messages.append("TEXTAPPLY_SUMMARY|=|1|=|0")
+            elif layer_mode:
                 if EMPTY in payload:
                     messages.append("LAYERSUMMARY|=|0|=|0|=|0")
                     messages.append("LAYERCLASS_READY")
@@ -65,6 +83,8 @@ def _messages_for(script_text: str) -> list[str]:
         elif upper in {"_.QSAVE", "_QSAVE"} and pending and Path(pending).is_file():
             path = Path(pending)
             data = path.read_bytes()
+            if text_apply and b"\nTEXTAPPLIED" not in data:
+                data += b"\nTEXTAPPLIED"
             if layer_mode and b"\nLAYERAPPLIED" not in data:
                 data += b"\nLAYERAPPLIED"
             path.write_bytes(data)

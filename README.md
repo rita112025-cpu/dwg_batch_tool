@@ -5,7 +5,7 @@
 
 | 項目 | 狀態 |
 | --- | --- |
-| 自動化測試 | 261 collected。無 AutoCAD 的環境為 239 passed / 22 skipped（含缺字體修復與自動分圖層；`accore` 測試在 AutoCAD 2027 上才會執行） |
+| 自動化測試 | 276 collected。無 AutoCAD 的環境為 254 passed / 22 skipped（含缺字體修復、自動分圖層、文字擷取／取代；`accore` 測試在 AutoCAD 2027 上才會執行） |
 | Real project validation | SB12 Round 1 FAIL（v1.5）→ Round 2 PASS（P0 修正，v1.5.1）→ Round 3 PASS（P1 evidence metadata，v1.5.2）；見 [docs/REAL_PROJECT_VALIDATION_STATUS.md](docs/REAL_PROJECT_VALIDATION_STATUS.md) |
 | Production Approval | NOT APPROVED |
 | 版本標籤 | `v1.6.0`（前版 `v1.5.2`、`v1.5.1`、`v1.5-semantic-validation-candidate`） |
@@ -95,6 +95,47 @@ GUI log 寫入 `output\logs\gui.log`。掃描不會執行 AutoCAD、不修改任
 5. `logs\fontfix_results.csv` 與 `fontfix.log` 有舊字體 → 新字體，以及存檔後仍缺字的樣式。
 6. 「另存版本」選 AutoCAD 2013，再用「DWG / DWT 版本表」確認該檔是 `AC1027→2013`。
 7. 處理中按「停止」，批次會在目前檔案後停下，已完成的輸出保留。
+
+### 文字擷取
+「② 我要做什麼？」選擇「文字擷取」。使用上方的輸入／輸出資料夾（兩者不可相同，輸出也不可放在輸入裡面），輸入搜尋文字後按「開始擷取文字」。
+
+這個模式只讀圖，不輸出 DWG，也不修改原始圖檔。每個 DWG 先複製到暫存檔再交給 `accoreconsole`，所以正在 AutoCAD 裡開啟的圖只要還能讀取，也會用複本處理。
+
+AutoLISP 沒有正規表示式。LISP 只負責走訪文字並印出清單，Python 再套用規則：
+- 物件：`TEXT`、`MTEXT`、`ATTRIB`、`ATTDEF`。模型空間與紙空間配置都掃。`ATTRIB` 若掛在圖塊插入上，會帶該圖塊名稱。
+- 「包含圖塊定義裡的文字」預設關閉。打開後才會走圖塊定義（含匿名圖塊），座標是圖塊內部座標，空間欄位寫「圖塊定義」。取代模式也預設關閉，避免一改定義就改到每一個插入。
+- 比對方式：包含文字、萬用字元（`*` 與 `?`，比對整段文字）、正規表示式。預設不區分大小寫。
+- `MTEXT` 先去掉格式碼再比對（`\H`、`\C`、`\f`、顏色與大括號等）。堆疊分數 `\S...;` 與欄位碼裡的文字不納入比對。
+
+結果在輸出資料夾的 `logs\`（CSV 為 UTF-8 含 BOM，Excel 可直接開中文）：
+- `textextract_hits.csv`：一筆符合一列。欄位為檔案、空間/版面、圖層、物件類型、圖塊名稱、文字內容、符合部分、X、Y、handle。
+- `textextract_results.csv`：每個 DWG 一列（狀態、符合筆數）。沒有符合的檔案狀態是「無符合」，仍算成功。
+- `textextract.log`、`textextract_batch_*.stdout.log`。
+
+### 文字取代
+「② 我要做什麼？」選擇「文字取代」。尋找／取代成可以是一般文字，或正規表示式（取代內容可用 `\1`、`\2`）。範例：尋找 `^(W\d+)\s.*$`、取代成 `\1`，會留下假梁編號、去掉後面的尺寸。
+
+修改只發生在暫存複本。有變更的 DWG 才寫進輸出資料夾；原始圖的時間與內容不變。
+- 「只產生變更清單，不輸出 DWG」是預覽。狀態為「預覽」，仍然寫出變更清單。
+- 沒有符合的檔案狀態是「無變更」，預設不複製。勾選「沒有變更的檔案也複製到輸出資料夾」才會複製。
+- 「把變更過的文字改成 ACI 色號」只改有動到的文字（0=BYBLOCK，256=BYLAYER）。沒勾就保持原色。
+- 已存在的輸出 DWG 會略過，除非勾選覆寫。
+
+結果：
+- `textreplace_changes.csv`：檔案、圖層、物件類型、handle、原文字、新文字、次數。
+- `textreplace_results.csv`：每個 DWG 的狀態與變更筆數。
+- `textreplace.log`，以及擷取與寫回各一份 `textreplace*_batch_*.stdout.log`。
+
+MTEXT 會把新的純文字嵌回原本的格式碼，所以沒改到的字仍保留字高與字型。若格式碼對不回去（例如取代碰到堆疊分數），就改寫成已跳脫的純文字，狀態仍是「已輸出」或「預覽」，錯誤欄與 log 會寫「MTEXT 格式碼無法完整保留」。`TEXT` 的 DXF 文字約 250 字一個群組，較長的結果會切段寫回。多行 `ATTRIB` 只處理群組 1。
+
+不在範圍內：標註文字、引線、表格、外部參考裡的文字、欄位碼的計算結果。`FONTALT` 只設成 `txt.shx` 以避免缺字對話框，不會改文字樣式。版本維持 `QSAVE` 的目前格式。
+
+本機確認（Windows、AutoCAD 2027，不是 LT）：
+1. `git pull` 這個分支後，選「文字擷取」，搜尋一段已知的梁編號或中文註解。
+2. 開啟 `logs\textextract_hits.csv`，核對空間、圖層、圖塊名稱與座標。原始 DWG 的修改時間不變。
+3. 選「文字取代」，用上面的 `^(W\d+)\s.*$` → `\1`，先勾「只產生變更清單」。確認沒有輸出 DWG，變更清單的新文字只剩編號。
+4. 取消預覽再跑一次。輸出 DWG 用 AutoCAD 打開，被改的 MTEXT 仍保留字高；沒有符合的檔不會出現在輸出，除非有勾複製。
+5. 讓其中一個 DWG 維持在 AutoCAD 開啟，再跑一次，原始檔仍不被存回。
 
 ### 自動分圖層
 「② 我要做什麼？」選擇「自動分圖層」。圖檔常常整張都在圖層 0。這個模式依物件類型把實體搬到對應圖層，使用和缺字體修復相同的 accoreconsole 批次、輸出資料夾、`logs\`、`|=|` 結果列與暫存複本。原始圖檔不會被改寫；正在 AutoCAD 裡開啟的圖只要還能讀取，也會用複本處理。
