@@ -88,6 +88,15 @@ def _messages_for(script_text: str) -> list[str]:
             if layer_mode and b"\nLAYERAPPLIED" not in data:
                 data += b"\nLAYERAPPLIED"
             path.write_bytes(data)
+        elif upper in {"_.SAVEAS", "_SAVEAS"} and index + 3 < len(lines) and lines[index + 1].strip().upper() == "DXF":
+            # convert_batch form: _SAVEAS / DXF / <Enter> / "target". Test "DWGs" hold DXF text,
+            # so the bytes are written through unchanged.
+            target = lines[index + 3].strip().strip('"')
+            if pending and Path(pending).is_file():
+                Path(target).parent.mkdir(parents=True, exist_ok=True)
+                Path(target).write_bytes(Path(pending).read_bytes())
+            index += 4
+            continue
         elif upper in {"_.SAVEAS", "_SAVEAS"} and index + 2 < len(lines):
             target = lines[index + 2].strip().strip('"')
             if pending and Path(pending).is_file():
