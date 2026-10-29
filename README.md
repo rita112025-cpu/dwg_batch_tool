@@ -215,6 +215,21 @@ MTEXT 會把新的純文字嵌回原本的格式碼，所以沒改到的字仍�
 .venv\Scripts\python scripts\dwgdiff.py <舊版> <新版> <輸出資料夾> [--accore <accoreconsole.exe>] [--tolerance 0.001] [--no-handles]
 ```
 
+### 圖層標準檢查
+「② 我要做什麼？」選擇「圖層標準檢查」，指定圖層標準檔（預設為 `samples\layer_standard.csv`，另有 JSON 範例 `samples\layer_standard.json`）。DXF 直接用 ezdxf 讀取，不需要 AutoCAD；DWG 先用 accoreconsole 轉成 `layer_check\dxf\`。原始圖檔不會被改寫。後端是 `scripts\layerstd.py`。
+
+標準檔每列一條，`kind` 欄位決定類型：
+- `exact` / `wildcard` / `regex`：圖層規則，比對圖層名稱（不分大小寫，第一條符合的規則生效）。`color`（ACI，可寫 `1|7` 或 `1-9`）、`linetype`、`lineweight`（`0.25`、`25` 或 `default`）、`plot`（yes/no）空白表示不限；`required=yes` 表示必須至少有一個圖層符合。
+- `forbidden`：符合 `pattern`（萬用字元）的圖層不得存在。
+- `setting`：全域設定，`pattern` 為名稱、`value` 為值：`name_regex`（命名規則，區分大小寫）、`unlisted_layers`、`layer0_entities`、`empty_layers`（皆為 `error` / `warning` / `off`）。
+
+違規類型：`NAME_NONSTANDARD`、`COLOR_MISMATCH`、`LINETYPE_MISMATCH`、`LINEWEIGHT_MISMATCH`、`PLOT_MISMATCH`、`ENTITIES_ON_LAYER_0`（只算模型／配置空間，圖塊定義內的圖元不算）、`EMPTY_LAYER`、`MISSING_REQUIRED_LAYER`、`LAYER_FORBIDDEN`。圖層 `0` 與 `Defpoints` 不做命名與空圖層檢查。
+
+輸出在輸出資料夾的 `layer_check\`：
+- `layer_check_details.csv`：每筆違規一列（file、layer、rule、severity、expected、actual）。
+- `layer_check_summary.csv`：每檔一列，含錯誤／警告數與合規率（沒有錯誤級違規的圖層數 ÷（圖層數＋缺少的必要圖層數））。
+- `layer_check_report.html`：單檔 HTML 報告，內嵌 CSS，可直接寄給別人開啟。
+
 ### 桌面捷徑
 雙擊 `create_shortcut.bat` 會在桌面建立「DWG分析」捷徑（圖示為 `dwg_analysis.ico`）。
 捷徑存的是絕對路徑：**搬移或改名資料夾後，捷徑與圖示都會失效**，在新位置再執行一次 `create_shortcut.bat` 即可。

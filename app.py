@@ -26,6 +26,7 @@ import parallel  # noqa: E402
 import dwgdiff  # noqa: E402
 import titleblock  # noqa: E402
 import titleblock_batch  # noqa: E402
+import layerstd  # noqa: E402
 
 try:  # crisp text on high-DPI Windows displays
     import ctypes
@@ -62,6 +63,7 @@ PRIMARY_RESULTS = {
     "textextract": ("logs/textextract_hits.csv",),
     "textreplace": ("logs/textreplace_changes.csv",),
     "layerclass": ("logs/layerclass_moves.csv",),
+    "layerstd": ("layer_check/layer_check_report.html",),
     "dwgdiff": ("dwgdiff/diff_summary.csv",),
     "titleblock": ("logs/titleblock_results.csv", "titleblock_attrs.csv"),
     "dwg": ("csv/scada_hits.csv", "csv/file_index.csv"),
@@ -257,7 +259,7 @@ class App:
         radio_row.pack(fill="x", padx=6, pady=6)
         self.mode_buttons = []
         modes = (("scan", "掃描資料夾"), ("version", "DWG / DWT 版本表"), ("fontfix", "缺字體修復"),
-                 ("layerclass", "自動分圖層"),
+                 ("layerclass", "自動分圖層"), ("layerstd", "圖層標準檢查"),
                  ("textextract", "文字擷取"), ("textreplace", "文字取代"), ("titleblock", "圖框屬性"),
                  ("dwg", "DWG 轉 DXF + 解析"), ("analysis", "工程資料分析"),
                  ("dwgdiff", "差異比對"))
@@ -519,6 +521,33 @@ class App:
 
         self._build_diff_frame()
 
+        std_box = ttk.Frame(self.mode_frame)
+        self.mode_frames["layerstd"] = std_box
+        ttk.Label(std_box, text="圖層標準檢查",
+                  font=(tkfont.nametofont("TkDefaultFont").actual("family"), 11)).pack(anchor="w")
+        ttk.Label(
+            std_box,
+            text=("依圖層標準檔（CSV 或 JSON）檢查每張圖的圖層名稱、顏色、線型、線寬、列印設定、"
+                  "圖層 0 上的圖元、空圖層與必要圖層。\n"
+                  "DXF 直接讀取；DWG 先用 accoreconsole 轉成 DXF。原始圖檔不會被改寫。"
+                  "範例標準檔：samples\\layer_standard.csv"),
+            justify="left", wraplength=760,
+        ).pack(anchor="w", pady=(2, 6))
+        std_form = ttk.Frame(std_box)
+        std_form.pack(fill="x")
+        self.v_ls_standard = tk.StringVar(value=str(ROOT / "samples" / "layer_standard.csv"))
+        ttk.Label(std_form, text="圖層標準檔", width=14).grid(row=0, column=0, sticky="w", pady=2)
+        ttk.Entry(std_form, textvariable=self.v_ls_standard).grid(row=0, column=1, sticky="ew", pady=2)
+        self.btn_ls_browse = ttk.Button(std_form, text="瀏覽", command=self._browse_layer_standard)
+        self.btn_ls_browse.grid(row=0, column=2, padx=4)
+        std_form.columnconfigure(1, weight=1)
+        self.v_ls_overwrite = tk.BooleanVar(value=False)
+        ttk.Checkbutton(std_box, text="包含子資料夾", variable=self.opts["recursive"]).pack(anchor="w")
+        ttk.Checkbutton(std_box, text="重新轉換已存在的 DXF（layer_check\\dxf）",
+                        variable=self.v_ls_overwrite).pack(anchor="w")
+        self.btn_layerstd = ttk.Button(std_box, text="開始檢查圖層", command=self._start_layerstd)
+        self.btn_layerstd.pack(anchor="w", pady=(6, 0))
+
         # ---- 4 執行狀態 ----
         st = ttk.LabelFrame(main, text="④ 執行狀態")
         st.pack(fill="both", expand=True, **pad)
@@ -588,6 +617,9 @@ class App:
             ("差異比對", (("開啟 diff_summary.csv", "dwgdiff/diff_summary.csv"),
                       ("開啟 diff_details.csv", "dwgdiff/diff_details.csv"),
                       ("開啟 diff_report.json", "dwgdiff/diff_report.json"))),
+            ("圖層標準檢查", (("開啟 layer_check_report.html", "layer_check/layer_check_report.html"),
+                        ("開啟 layer_check_summary.csv", "layer_check/layer_check_summary.csv"),
+                        ("開啟 layer_check_details.csv", "layer_check/layer_check_details.csv"))),
             ("DWG 結果", (("開啟 scada_hits.csv", "csv/scada_hits.csv"), ("開啟 object_hits.csv", "csv/object_hits.csv"),
                          ("開啟 file_index.csv", "csv/file_index.csv"))),
             ("工程分析結果", (("開啟 project.db", "database/project.db"),
@@ -695,6 +727,7 @@ class App:
         for widget in (self.mode_buttons + self.browse_buttons +
                        [self.btn_scan, self.btn_versions, self.btn_analysis, self.btn_fontfix,
                         self.btn_extract, self.btn_replace, self.btn_layer,
+                        self.btn_layerstd, self.btn_ls_browse,
                         self.btn_files, self.btn_folder, self.btn_recheck, self.btn_save_config,
                         self.spin_workers]):
             widget.configure(state=state)
@@ -1581,6 +1614,91 @@ class App:
         self._refresh_analysis_outputs()
         self._reveal(self.result_frame)
 
+    def _browse_layer_standard(self):
+        path = filedialog.askopenfilename(title="選擇圖層標準檔",
+                                          filetypes=[("圖層標準", "*.csv *.json"), ("所有檔案", "*.*")])
+        if path:
+            self.v_ls_standard.set(path)
+
+    def _start_layerstd(self):
+        """DXF files need no AutoCAD; DWGs without accoreconsole are reported per file."""
+        if self._busy():
+            return
+        src = self.v_in.get().strip()
+        dst = self.v_out.get().strip()
+        standard = self.v_ls_standard.get().strip()
+        if not Path(src).is_dir():
+            messagebox.showerror("路徑錯誤", f"輸入資料夾不存在：{src}")
+            return
+        if not dst:
+            messagebox.showerror("路徑錯誤", "請選擇輸出資料夾")
+            return
+        try:
+            layerstd.load_standard(standard)
+        except (OSError, ValueError, re.error) as exc:
+            messagebox.showerror("圖層標準檔", str(exc))
+            return
+        accore = self.cfg.get("accoreconsole", "") if self.env_ok else ""
+        recursive = self.opts["recursive"].get()
+        overwrite = self.v_ls_overwrite.get()
+        timeout = int(self.cfg.get("timeout_seconds", 300))
+        self.stop_event.clear()
+        self._can_stop = True
+        self.summary = None
+        self.v_progress.set(0)
+        self.v_ptext.set("")
+        self.v_current.set("")
+        self.v_result.set("圖層標準檢查中...")
+        self._set_status("running", "圖層標準檢查中…")
+
+        def work():
+            try:
+                result = layerstd.run(
+                    src, dst, standard, accore, recursive=recursive, overwrite=overwrite,
+                    timeout=timeout, stop_event=self.stop_event,
+                    progress=lambda i, n, cur: self.q.put(("progress", "圖層標準檢查", i, n, cur)),
+                    log=lambda level, message: self.q.put(("log", level, message)),
+                )
+            except Exception as exc:  # noqa: BLE001
+                result = dict(dwg=0, ok=0, failed=0, skipped=0, errors=0, violations=0, stopped=False,
+                              fatal=f"{type(exc).__name__}: {exc}", failed_files=[], reports={})
+                common.log_error({"output_dir": dst}, f"layerstd crashed: {result['fatal']}")
+            self.q.put(("layerstd_done", result))
+
+        self.worker = threading.Thread(target=work, daemon=True)
+        self.worker.start()
+        self._set_busy_ui(True)
+
+    def _on_layerstd_done(self, result):
+        self.summary = result
+        self.worker = None
+        self._can_stop = False
+        self._set_busy_ui(False)
+        if result.get("dwg", 0) == 0 and not result.get("fatal") and not result.get("stopped"):
+            state, verdict = "warning", "沒有找到 DWG / DXF"
+        else:
+            state, verdict = classify_outcome(result)
+            if state == "success" and result.get("violations"):
+                state, verdict = "warning", "檢查完成，有圖層不符合標準"
+        failed_files = result.get("failed_files", [])
+        shown = "\n".join(f"  - {friendly_failure(x)}" for x in failed_files[:8])
+        if len(failed_files) > 8:
+            shown += f"\n  ... 另有 {len(failed_files) - 8} 個（見 layer_check_summary.csv）"
+        st = STATE[state]
+        self.v_result.set(
+            f"{st['symbol']} {st['label']}：{verdict}\n"
+            f"檔案：{result.get('dwg', 0)}　已檢查：{result.get('ok', 0)}　失敗：{result.get('failed', 0)}\n"
+            f"違規：{result.get('violations', 0)}（錯誤 {result.get('errors', 0)}）\n"
+            f"報告：layer_check/layer_check_report.html"
+            + (f"\n錯誤：{result['fatal']}" if result.get("fatal") else "")
+            + (f"\n\n失敗檔案：\n{shown}" if failed_files else "")
+        )
+        self._set_status(state, verdict)
+        if not result.get("fatal") and not result.get("stopped"):
+            self.v_progress.set(100)
+        self._refresh_analysis_outputs()
+        self._reveal(self.result_frame)
+
     # ---------- run ----------
     def _busy(self):
         return self.worker is not None and self.worker.is_alive()
@@ -1683,6 +1801,8 @@ class App:
                     self._on_tb_write_done(m[1])
                 elif k == "layer_done":
                     self._on_layer_done(m[1])
+                elif k == "layerstd_done":
+                    self._on_layerstd_done(m[1])
                 elif k == "diff_done":
                     self._on_diff_done(m[1])
                 elif k == "env_paths":
