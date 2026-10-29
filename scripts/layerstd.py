@@ -33,6 +33,8 @@ from pathlib import Path
 
 import ezdxf
 
+from common import log_error
+
 STANDARD_FIELDS = ["kind", "pattern", "value", "color", "linetype", "lineweight", "plot",
                    "required", "description"]
 DETAIL_FIELDS = ["file", "layer", "rule", "severity", "expected", "actual"]
@@ -605,6 +607,7 @@ def run(input_dir, output_dir, standard_path, accore="", *, recursive=True, over
         else:
             summary["failed"] += 1
             summary["failed_files"].append(f"{path}: FAILED {row['error']}")
+            log_error(Path(output_dir) / "logs", f"layer check {path} -> {row['error']}")
             log("ERROR", f"{path.name}：{row['error']}")
     summary["results"] = summaries
     try:
