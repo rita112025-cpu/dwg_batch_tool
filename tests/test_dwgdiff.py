@@ -185,3 +185,81 @@ def test_main(tmp_path, capsys):
     a = _save(_base(), tmp_path / "a.dxf")
     assert dwgdiff.main([str(a), str(a), str(tmp_path / "out")]) == 0
     assert dwgdiff.main([str(tmp_path / "x.dxf"), str(a), str(tmp_path / "out")]) == 2
+
+
+def test_gui_diff_mode(tmp_path, monkeypatch, tk_root):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    import app as appmod
+    monkeypatch.setattr(appmod.App, "_check_env", lambda self: None)
+    for widget in tk_root.winfo_children():
+        widget.destroy()
+    a = appmod.App(tk_root)
+    a.v_mode.set("dwgdiff")
+    a._refresh_mode_ui()
+    assert a.mode_frames["dwgdiff"].winfo_manager()
+    errors = []
+    monkeypatch.setattr(appmod.messagebox, "showerror", lambda *args: errors.append(args))
+    a._start_diff()
+    assert errors and a.worker is None
+    doc = _base()
+    old = _save(doc, tmp_path / "a.dxf")
+    new = _save(_revised_from(doc), tmp_path / "b.dxf")
+    a.v_df_old.set(str(old))
+    a.v_df_new.set(str(new))
+    a.v_out.set(str(tmp_path / "out"))
+    a._start_diff()
+    a.worker.join(timeout=30)
+    message = a.q.get(timeout=5)
+    while message[0] != "diff_done":
+        message = a.q.get(timeout=5)
+    a._on_diff_done(message[1])
+    assert "有差異：1" in a.v_result.get()
+    assert str(a.btn_diff["state"]) == "normal"
+    assert appmod.get_primary_result("dwgdiff", tmp_path / "out").name == "diff_summary.csv"
+    a._on_diff_done(dict(pairs=0, fatal="", failed_files=[f"x{i}" for i in range(10)]))
+    assert "沒有找到" in a.v_result.get() and "另有 2 個" in a.v_result.get()
+
+
+def test_more_entity_kinds_and_fields():
+    doc = ezdxf.new("R2018")
+    msp = doc.modelspace()
+    msp.add_polyline2d([(0, 0), (1, 0), (1, 1)], close=True)
+    msp.add_spline(fit_points=[(0, 0), (1, 2), (3, 1)])
+    hatch = msp.add_hatch()
+    hatch.paths.add_polyline_path([(0, 0), (2, 0), (2, 2)])
+    snap = dwgdiff.snapshot(doc, include_paper=False)
+    kinds = {rec["type"]: rec for rec in snap["entities"]}
+    assert kinds["POLYLINE"]["geom"]["closed"] == (1.0,)
+    assert kinds["SPLINE"]["geom"]["fit"]
+    assert "bbox" in kinds["HATCH"]["geom"] and kinds["HATCH"]["position"]
+
+    def rec(**kw):
+        base = {"handle": "1", "type": "INSERT", "layer": "0", "layout": "Model", "category": "BLOCK",
+                "geom": {"insert": (0.0, 0.0)}, "props": {}, "content": {"block": "B"}, "attribs": {},
+                "position": "0,0"}
+        base.update(kw)
+        return base
+    changes = dwgdiff.compare_entities(
+        rec(attribs={"A": "1", "B": "2"}),
+        rec(layer="X", props={"color": "1"}, attribs={"B": "2", "C": "3"}), 0.001)
+    got = {(c["category"], c["change_type"], c["field"]) for c in changes}
+    assert ("BLOCK", "MODIFIED", "layer") in got and ("BLOCK", "MODIFIED", "properties") in got
+    assert ("ATTRIBUTE", "REMOVED", "A") in got and ("ATTRIBUTE", "ADDED", "C") in got
+    assert not dwgdiff.geom_close({"a": (1.0,)}, {"b": (1.0,)}, 1)
+    assert not dwgdiff.geom_close({"a": (1.0,)}, {"a": (1.0, 2.0)}, 1)
+    assert "measurement=5" in dwgdiff._describe(rec(content={"measurement": "5"}, attribs={"T": "v"}))
+    same_handle_other_type = dwgdiff.match_entities([rec()], [rec(type="TEXT")], 0.001)
+    assert len(same_handle_other_type[1]) == 1 and len(same_handle_other_type[2]) == 1
+
+    old_layers = {"a": dwgdiff.layer_record(ezdxf.new().layers.add("A"))}
+    layer = ezdxf.new().layers.add("A")
+    layer.off()
+    layer.lock()
+    new_layers = {"a": dwgdiff.layer_record(layer)}
+    fields = {c["field"] for c in dwgdiff.diff_layers(old_layers, new_layers)}
+    assert {"on", "locked"} <= fields
+
+    class Broken:
+        def get_measurement(self):
+            raise ValueError("no")
+    assert dwgdiff._dimension_value(Broken()) == ""

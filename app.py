@@ -22,6 +22,7 @@ import dwgtext  # noqa: E402
 import textbatch  # noqa: E402
 import layerclass  # noqa: E402
 import layerbatch  # noqa: E402
+import dwgdiff  # noqa: E402
 
 try:  # crisp text on high-DPI Windows displays
     import ctypes
@@ -58,6 +59,7 @@ PRIMARY_RESULTS = {
     "textextract": ("logs/textextract_hits.csv",),
     "textreplace": ("logs/textreplace_changes.csv",),
     "layerclass": ("logs/layerclass_moves.csv",),
+    "dwgdiff": ("dwgdiff/diff_summary.csv",),
     "dwg": ("csv/scada_hits.csv", "csv/file_index.csv"),
     "analysis": ("cross_reference/cross_reference.csv", "database/project.db"),
 }
@@ -244,7 +246,8 @@ class App:
         modes = (("scan", "掃描資料夾"), ("version", "DWG / DWT 版本表"), ("fontfix", "缺字體修復"),
                  ("layerclass", "自動分圖層"),
                  ("textextract", "文字擷取"), ("textreplace", "文字取代"),
-                 ("dwg", "DWG 轉 DXF + 解析"), ("analysis", "工程資料分析"))
+                 ("dwg", "DWG 轉 DXF + 解析"), ("analysis", "工程資料分析"),
+                 ("dwgdiff", "差異比對"))
         for i, (value, text) in enumerate(modes):
             radio = ttk.Radiobutton(radio_row, text=text, value=value, variable=self.v_mode,
                                     command=self._refresh_mode_ui)
@@ -499,6 +502,8 @@ class App:
         self.btn_layer = ttk.Button(layer_box, text="開始分圖層", command=self._start_layerclass)
         self.btn_layer.pack(anchor="w", pady=(6, 0))
 
+        self._build_diff_frame()
+
         # ---- 4 執行狀態 ----
         st = ttk.LabelFrame(main, text="④ 執行狀態")
         st.pack(fill="both", expand=True, **pad)
@@ -562,6 +567,9 @@ class App:
             ("自動分圖層", (("開啟 layerclass_moves.csv", "logs/layerclass_moves.csv"),
                        ("開啟 layerclass_results.csv", "logs/layerclass_results.csv"),
                        ("開啟 layerclass.log", "logs/layerclass.log"))),
+            ("差異比對", (("開啟 diff_summary.csv", "dwgdiff/diff_summary.csv"),
+                      ("開啟 diff_details.csv", "dwgdiff/diff_details.csv"),
+                      ("開啟 diff_report.json", "dwgdiff/diff_report.json"))),
             ("DWG 結果", (("開啟 scada_hits.csv", "csv/scada_hits.csv"), ("開啟 object_hits.csv", "csv/object_hits.csv"),
                          ("開啟 file_index.csv", "csv/file_index.csv"))),
             ("工程分析結果", (("開啟 project.db", "database/project.db"),
@@ -1306,6 +1314,120 @@ class App:
         self._refresh_analysis_outputs()
         self._reveal(self.result_frame)
 
+    # ---------- DWG diff ----------
+    def _build_diff_frame(self):
+        box = ttk.Frame(self.mode_frame)
+        self.mode_frames["dwgdiff"] = box
+        ttk.Label(box, text="差異比對",
+                  font=(tkfont.nametofont("TkDefaultFont").actual("family"), 11)).pack(anchor="w")
+        ttk.Label(
+            box,
+            text=("比對兩版圖面：可選兩個檔案，或兩個資料夾（依相對路徑配對，副檔名不計）。\n"
+                  "DWG 會先用 accoreconsole 轉成 DXF；DXF 直接讀取。原始圖檔不會被修改。\n"
+                  "結果寫到輸出資料夾的 dwgdiff/（diff_summary.csv、diff_details.csv、diff_report.json）。"),
+            justify="left", wraplength=760,
+        ).pack(anchor="w", pady=(2, 6))
+        form = ttk.Frame(box)
+        form.pack(fill="x")
+        self.v_df_old = tk.StringVar(value="")
+        self.v_df_new = tk.StringVar(value="")
+        self.v_df_tol = tk.StringVar(value="0.001")
+        for row, (label, var) in enumerate((("舊版（檔案或資料夾）", self.v_df_old), ("新版（檔案或資料夾）", self.v_df_new))):
+            ttk.Label(form, text=label, width=20).grid(row=row, column=0, sticky="w", pady=2)
+            ttk.Entry(form, textvariable=var).grid(row=row, column=1, sticky="ew", pady=2, padx=4)
+            ttk.Button(form, text="資料夾", command=lambda v=var: self._browse(v)).grid(row=row, column=2, padx=2)
+            ttk.Button(form, text="檔案", command=lambda v=var: self._browse_drawing(v)).grid(row=row, column=3, padx=2)
+        ttk.Label(form, text="座標容差", width=20).grid(row=2, column=0, sticky="w", pady=2)
+        ttk.Entry(form, textvariable=self.v_df_tol, width=12).grid(row=2, column=1, sticky="w", pady=2, padx=4)
+        form.columnconfigure(1, weight=1)
+        self.v_df_handles = tk.BooleanVar(value=True)
+        self.v_df_paper = tk.BooleanVar(value=True)
+        ttk.Checkbutton(box, text="優先以 handle 配對物件（取消則只用類型＋圖層＋幾何）",
+                        variable=self.v_df_handles).pack(anchor="w")
+        ttk.Checkbutton(box, text="包含配置（紙空間）", variable=self.v_df_paper).pack(anchor="w")
+        ttk.Checkbutton(box, text="包含子資料夾", variable=self.opts["recursive"]).pack(anchor="w")
+        self.btn_diff = ttk.Button(box, text="開始比對", command=self._start_diff)
+        self.btn_diff.pack(anchor="w", pady=(8, 0))
+
+    def _browse_drawing(self, var):
+        path = filedialog.askopenfilename(title="選擇圖檔", filetypes=[("圖檔", "*.dwg *.dxf"), ("所有檔案", "*.*")])
+        if path:
+            var.set(path)
+
+    def _start_diff(self):
+        if self._busy():
+            return
+        old, new = self.v_df_old.get().strip(), self.v_df_new.get().strip()
+        dst = self.v_out.get().strip()
+        if not old or not new or not dst:
+            messagebox.showerror("路徑錯誤", "請指定舊版、新版與輸出資料夾。")
+            return
+        tolerance = self.v_df_tol.get().strip()
+        use_handles = self.v_df_handles.get()
+        include_paper = self.v_df_paper.get()
+        recursive = self.opts["recursive"].get()
+        timeout = int(self.cfg.get("timeout_seconds", 300))
+        accore = self.cfg.get("accoreconsole", "")
+        self.stop_event.clear()
+        self._can_stop = True
+        self.summary = None
+        self.v_progress.set(0)
+        self.v_ptext.set("")
+        self.v_current.set("")
+        self.v_result.set("比對中...")
+        self._set_status("running", "差異比對中…")
+
+        def work():
+            try:
+                result = dwgdiff.run(
+                    old, new, dst, accore, tolerance=tolerance, recursive=recursive,
+                    use_handles=use_handles, include_paper=include_paper, timeout=timeout,
+                    stop_event=self.stop_event,
+                    on_progress=lambda stage, i, n, cur: self.q.put(("progress", stage, i, n, cur)),
+                    log=lambda level, message: self.q.put(("log", level, message)),
+                )
+            except Exception as exc:  # noqa: BLE001
+                result = dict(pairs=0, ok=0, changed=0, identical=0, failed=0, skipped=0, added=0,
+                              removed=0, modified=0, stopped=False, fatal=f"{type(exc).__name__}: {exc}",
+                              failed_files=[], elapsed=0)
+                common.log_error({"output_dir": dst}, f"dwgdiff crashed: {result['fatal']}")
+            self.q.put(("diff_done", result))
+
+        self.worker = threading.Thread(target=work, daemon=True)
+        self.worker.start()
+        self._set_busy_ui(True)
+        self.btn_diff.configure(state="disabled")
+
+    def _on_diff_done(self, result):
+        self.summary = result
+        self.worker = None
+        self._can_stop = False
+        self._set_busy_ui(False)
+        self.btn_diff.configure(state="normal")
+        if result.get("pairs", 0) == 0 and not result.get("fatal"):
+            state, verdict = "warning", "沒有找到可比對的 DWG / DXF"
+        else:
+            state, verdict = classify_outcome(result)
+        failed_files = result.get("failed_files", [])
+        shown = "\n".join(f"  - {x}" for x in failed_files[:8])
+        if len(failed_files) > 8:
+            shown += f"\n  ... 另有 {len(failed_files) - 8} 個（見 errors.log）"
+        st = STATE[state]
+        self.v_result.set(
+            f"{st['symbol']} {st['label']}：{verdict}\n"
+            f"配對：{result.get('pairs', 0)}　有差異：{result.get('changed', 0)}　相同：{result.get('identical', 0)}　"
+            f"只在一邊：{result.get('skipped', 0)}　失敗：{result.get('failed', 0)}\n"
+            f"新增：{result.get('added', 0)}　刪除：{result.get('removed', 0)}　修改：{result.get('modified', 0)}\n"
+            f"結果：dwgdiff/diff_summary.csv、dwgdiff/diff_details.csv"
+            + (f"\n錯誤：{result['fatal']}" if result.get("fatal") else "")
+            + (f"\n\n失敗檔案：\n{shown}" if failed_files else "")
+        )
+        self._set_status(state, verdict)
+        if not result.get("fatal") and not result.get("stopped"):
+            self.v_progress.set(100)
+        self._refresh_analysis_outputs()
+        self._reveal(self.result_frame)
+
     # ---------- run ----------
     def _busy(self):
         return self.worker is not None and self.worker.is_alive()
@@ -1404,6 +1526,8 @@ class App:
                     self._on_replace_done(m[1])
                 elif k == "layer_done":
                     self._on_layer_done(m[1])
+                elif k == "diff_done":
+                    self._on_diff_done(m[1])
                 elif k == "env_paths":
                     self._on_env_paths(m[1], m[2])
                 elif k == "env":
