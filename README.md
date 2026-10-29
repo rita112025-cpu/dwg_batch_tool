@@ -56,6 +56,12 @@ tkinter 介面：選輸入/輸出資料夾、勾選處理選項、編輯關鍵�
 GUI log 寫入 `output\logs\gui.log`。掃描不會執行 AutoCAD、不修改任何檔案。
 「產生 CSV」控制 analyze 的 CSV；`scada_hits.csv` 只要勾選「SCADA 關鍵字搜尋」就會產生。
 
+### 同時處理數（並行）
+「① 基本設定」的「同時處理數」決定同時開幾個 `accoreconsole`（1–8，預設為 CPU 邏輯核心數的一半、最多 4；寫進 `config.json` 的 `workers`）。DWG 轉 DXF、缺字體修復、文字擷取／取代、自動分圖層都會把檔案輪流分給這幾個程序同時處理；每個程序內仍是一次開多張圖，啟動成本只付一次。
+- 結果 CSV／JSONL 仍是一檔一列；DWG 轉 DXF 與缺字體修復是做完一張寫一列，所以列的順序可能和檔案順序不同。
+- 「停止」會同時中止所有程序。
+- 數字越大越快，但每個 `accoreconsole` 都會吃記憶體；大圖建議 2–3。
+
 ### DWG / DWT 版本表（免 AutoCAD、免管理員）
 來源區的「產生 DWG/DWT 版本表」會直接唯讀檔案前 6 bytes 的 `ACxxxx` header，輸出 `output/csv/dwg_versions.csv`。
 - 支援 `.dwg` 與 `.dwt`；DWT 使用相同的 DWG header 判讀方式。

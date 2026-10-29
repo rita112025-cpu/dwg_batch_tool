@@ -22,6 +22,7 @@ import dwgtext  # noqa: E402
 import textbatch  # noqa: E402
 import layerclass  # noqa: E402
 import layerbatch  # noqa: E402
+import parallel  # noqa: E402
 
 try:  # crisp text on high-DPI Windows displays
     import ctypes
@@ -168,6 +169,8 @@ class App:
         self.opts = {k: tk.BooleanVar(value=v) for k, v in dict(
             recursive=self.cfg.get("recursive", True), convert=True, analyze=True, scada=True,
             csv=True, json=True, overwrite=self.cfg.get("overwrite", False)).items()}
+        self.v_workers = tk.IntVar(value=parallel.clamp_workers(
+            self.cfg.get("workers", parallel.default_workers())))
         self.v_progress = tk.DoubleVar(value=0)
         self.v_ptext = tk.StringVar(value="")
         self.v_current = tk.StringVar(value="")
@@ -233,6 +236,13 @@ class App:
             button = ttk.Button(paths, text="瀏覽", command=lambda v=var: self._browse(v))
             button.grid(row=r, column=2, padx=4)
             self.browse_buttons.append(button)
+        ttk.Label(paths, text="同時處理數", width=12).grid(row=2, column=0, sticky="w", pady=3)
+        workers_row = ttk.Frame(paths)
+        workers_row.grid(row=2, column=1, columnspan=2, sticky="w", padx=4)
+        self.spin_workers = ttk.Spinbox(workers_row, from_=1, to=parallel.MAX_WORKERS, width=4,
+                                        textvariable=self.v_workers)
+        self.spin_workers.pack(side="left")
+        ttk.Label(workers_row, text="個 accoreconsole 同時執行（越多越快，也越耗記憶體）").pack(side="left", padx=6)
         paths.columnconfigure(1, weight=1)
 
         # ---- 2 我要做什麼 ----
@@ -669,7 +679,8 @@ class App:
         for widget in (self.mode_buttons + self.browse_buttons +
                        [self.btn_scan, self.btn_versions, self.btn_analysis, self.btn_fontfix,
                         self.btn_extract, self.btn_replace, self.btn_layer,
-                        self.btn_files, self.btn_folder, self.btn_recheck, self.btn_save_config]):
+                        self.btn_files, self.btn_folder, self.btn_recheck, self.btn_save_config,
+                        self.spin_workers]):
             widget.configure(state=state)
         self.btn_start.configure(state="normal" if not busy and self.env_ok else "disabled")
         self.btn_fontfix.configure(state="normal" if not busy and self.env_ok else "disabled")
@@ -765,15 +776,21 @@ class App:
     def _keywords(self):
         return [l.strip() for l in self.kw_text.get("1.0", "end").splitlines() if l.strip()]
 
+    def _workers(self):
+        try:
+            return parallel.clamp_workers(self.v_workers.get())
+        except tk.TclError:  # non-numeric text in the spinbox
+            return 1
+
     def _current_cfg(self):
         return dict(self.cfg, input_dir=self.v_in.get().strip(), output_dir=self.v_out.get().strip(),
-                    keywords=self._keywords())
+                    keywords=self._keywords(), workers=self._workers())
 
     def _save_config(self):
         cfg = {k: v for k, v in self.cfg.items() if not k.startswith("_")}
         cfg.update(input_dir=self.v_in.get().strip(), output_dir=self.v_out.get().strip(),
                    keywords=self._keywords(), recursive=self.opts["recursive"].get(),
-                   overwrite=self.opts["overwrite"].get())
+                   overwrite=self.opts["overwrite"].get(), workers=self._workers())
         try:
             (ROOT / "config.json").write_text(json.dumps(cfg, ensure_ascii=False, indent=2),
                                               encoding="utf-8")
@@ -968,6 +985,7 @@ class App:
         recursive = self.opts["recursive"].get()
         overwrite = self.v_ff_overwrite.get()
         timeout = int(self.cfg.get("timeout_seconds", 300))
+        workers = self._workers()
         accore = self.cfg.get("accoreconsole", "")
         self.stop_event.clear()
         self._can_stop = True
@@ -982,7 +1000,7 @@ class App:
             try:
                 result = fontfix_batch.run(
                     src, dst, accore, recursive=recursive, primary=primary, big=big,
-                    mapping=mapping, version=version, overwrite=overwrite, timeout=timeout,
+                    mapping=mapping, version=version, overwrite=overwrite, timeout=timeout, workers=workers,
                     stop_event=self.stop_event,
                     progress=lambda i, n, cur: self.q.put(("progress", "缺字體修復", i, n, cur)),
                     log=lambda level, message: self.q.put(("log", level, message)),
@@ -1078,6 +1096,7 @@ class App:
         include_blocks = self.v_tx_blocks.get()
         recursive = self.opts["recursive"].get()
         timeout = int(self.cfg.get("timeout_seconds", 300))
+        workers = self._workers()
         accore = self.cfg.get("accoreconsole", "")
         self.stop_event.clear()
         self._can_stop = True
@@ -1093,7 +1112,7 @@ class App:
                 result = textbatch.run_extract(
                     src, dst, accore, pattern=pattern, mode=mode,
                     case_sensitive=case_sensitive, include_blocks=include_blocks,
-                    recursive=recursive, timeout=timeout, stop_event=self.stop_event,
+                    recursive=recursive, timeout=timeout, workers=workers, stop_event=self.stop_event,
                     progress=lambda i, n, cur: self.q.put(("progress", "文字擷取", i, n, cur)),
                     log=lambda level, message: self.q.put(("log", level, message)),
                 )
@@ -1170,6 +1189,7 @@ class App:
         overwrite = self.v_rp_overwrite.get()
         recursive = self.opts["recursive"].get()
         timeout = int(self.cfg.get("timeout_seconds", 300))
+        workers = self._workers()
         accore = self.cfg.get("accoreconsole", "")
         src, dst = folders
         self.stop_event.clear()
@@ -1187,7 +1207,7 @@ class App:
                     src, dst, accore, find=find, repl=repl, mode=mode,
                     case_sensitive=case_sensitive, include_blocks=include_blocks,
                     color=color, dry_run=dry_run, copy_unchanged=copy_unchanged,
-                    recursive=recursive, overwrite=overwrite, timeout=timeout,
+                    recursive=recursive, overwrite=overwrite, timeout=timeout, workers=workers,
                     stop_event=self.stop_event,
                     progress=lambda i, n, cur: self.q.put(("progress", "文字取代", i, n, cur)),
                     log=lambda level, message: self.q.put(("log", level, message)),
@@ -1242,6 +1262,7 @@ class App:
         overwrite = self.v_ly_overwrite.get()
         recursive = self.opts["recursive"].get()
         timeout = int(self.cfg.get("timeout_seconds", 300))
+        workers = self._workers()
         accore = self.cfg.get("accoreconsole", "")
         self.stop_event.clear()
         self._can_stop = True
@@ -1260,7 +1281,7 @@ class App:
                     include_paper=include_paper, include_blocks=include_blocks,
                     insert_by_name=insert_by_name, unlock_locked=unlock_locked,
                     keep_appearance=keep_appearance, dry_run=dry_run,
-                    recursive=recursive, overwrite=overwrite, timeout=timeout,
+                    recursive=recursive, overwrite=overwrite, timeout=timeout, workers=workers,
                     stop_event=self.stop_event,
                     progress=lambda i, n, cur: self.q.put(("progress", "自動分圖層", i, n, cur)),
                     log=lambda level, message: self.q.put(("log", level, message)),
