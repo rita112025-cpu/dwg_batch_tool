@@ -6,6 +6,9 @@ markers a real console would, and writes the opened DWG through (QSAVE in place,
 or a copy for SAVEAS). A drawing whose bytes contain FONTFIX_TEST_CRASH makes it
 emit a blocking MessageBox and exit, so the batch runner's restart path can be
 tested without AutoCAD.
+
+Diff mode (``dd-dump-current``) prints the text stored after a ``DIFFDUMP_BEGIN``
+line inside the fake DWG, so a test drawing carries its own entity list.
 """
 from __future__ import annotations
 
@@ -15,6 +18,7 @@ from pathlib import Path
 
 CRASH = b"FONTFIX_TEST_CRASH"
 EMPTY = b"LAYER_TEST_EMPTY"
+DIFF_BEGIN = b"\nDIFFDUMP_BEGIN\n"
 
 _LAYER_DUMP = [
     "LAYERROW|=|PL|=|1|=|LWPOLYLINE|=|4|=|0|=|1",
@@ -43,7 +47,11 @@ def _messages_for(script_text: str) -> list[str]:
     text_dump = "tx-dump-current" in script_text
     text_apply = "tx-apply-" in script_text
     layer_mode = "lc-run" in script_text
-    messages = [] if text_dump or text_apply or layer_mode else ["FONTFIX_READY"]
+    diff_dump = "dd-dump-current" in script_text
+    if diff_dump:
+        messages = ["DIFFDUMP_READY"]
+    else:
+        messages = [] if text_dump or text_apply or layer_mode else ["FONTFIX_READY"]
     pending = ""
     index = 0
     while index < len(lines):
@@ -65,7 +73,13 @@ def _messages_for(script_text: str) -> list[str]:
                 messages.append("invalid drawing")
                 messages.append("*" * 30)
                 break
-            if text_dump:
+            if diff_dump:
+                if DIFF_BEGIN in payload:
+                    body = payload.split(DIFF_BEGIN, 1)[1].decode("utf-8")
+                    messages.extend(line for line in body.splitlines() if line.strip())
+                else:
+                    messages.append("DIFFDUMP_SUMMARY|=|0")
+            elif text_dump:
                 messages.extend(_TEXT_DUMP)
             elif text_apply:
                 messages.append("TEXTAPPLY|=|AB1|=|ok")

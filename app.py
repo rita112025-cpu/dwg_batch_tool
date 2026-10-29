@@ -22,6 +22,7 @@ import dwgtext  # noqa: E402
 import textbatch  # noqa: E402
 import layerclass  # noqa: E402
 import layerbatch  # noqa: E402
+import dwgdiff  # noqa: E402
 
 try:  # crisp text on high-DPI Windows displays
     import ctypes
@@ -58,6 +59,7 @@ PRIMARY_RESULTS = {
     "textextract": ("logs/textextract_hits.csv",),
     "textreplace": ("logs/textreplace_changes.csv",),
     "layerclass": ("logs/layerclass_moves.csv",),
+    "dwgdiff": ("logs/dwgdiff_report.html", "logs/dwgdiff_changes.csv"),
     "dwg": ("csv/scada_hits.csv", "csv/file_index.csv"),
     "analysis": ("cross_reference/cross_reference.csv", "database/project.db"),
 }
@@ -244,7 +246,8 @@ class App:
         modes = (("scan", "掃描資料夾"), ("version", "DWG / DWT 版本表"), ("fontfix", "缺字體修復"),
                  ("layerclass", "自動分圖層"),
                  ("textextract", "文字擷取"), ("textreplace", "文字取代"),
-                 ("dwg", "DWG 轉 DXF + 解析"), ("analysis", "工程資料分析"))
+                 ("dwg", "DWG 轉 DXF + 解析"), ("analysis", "工程資料分析"),
+                 ("dwgdiff", "圖面差異比對"))
         for i, (value, text) in enumerate(modes):
             radio = ttk.Radiobutton(radio_row, text=text, value=value, variable=self.v_mode,
                                     command=self._refresh_mode_ui)
@@ -499,6 +502,40 @@ class App:
         self.btn_layer = ttk.Button(layer_box, text="開始分圖層", command=self._start_layerclass)
         self.btn_layer.pack(anchor="w", pady=(6, 0))
 
+        diff_box = ttk.Frame(self.mode_frame)
+        self.mode_frames["dwgdiff"] = diff_box
+        ttk.Label(diff_box, text="圖面差異比對",
+                  font=(tkfont.nametofont("TkDefaultFont").actual("family"), 11)).pack(anchor="w")
+        ttk.Label(
+            diff_box,
+            text=("比對舊版與新版資料夾裡同名（同相對路徑）的 DWG，列出新增、刪除、修改的圖元，"
+                  "修改會列出改了哪個屬性（圖層、位置、尺寸、文字、圖塊名稱、屬性值）。\n"
+                  "先用 handle 配對，對不上的再用「類型＋座標」配對。每個 DWG 先複製到暫存檔再讀取，"
+                  "不存檔、不修改原始圖檔。結果寫到上方的輸出資料夾（logs/dwgdiff_report.html 與 dwgdiff_changes.csv）。"),
+            justify="left", wraplength=760,
+        ).pack(anchor="w", pady=(2, 6))
+        df_form = ttk.Frame(diff_box)
+        df_form.pack(fill="x")
+        self.v_df_old = tk.StringVar(value="")
+        self.v_df_new = tk.StringVar(value="")
+        for r, (label, var) in enumerate((("舊版資料夾", self.v_df_old), ("新版資料夾", self.v_df_new))):
+            ttk.Label(df_form, text=label, width=12).grid(row=r, column=0, sticky="w", pady=2)
+            ttk.Entry(df_form, textvariable=var).grid(row=r, column=1, sticky="ew", pady=2, padx=4)
+            button = ttk.Button(df_form, text="瀏覽", command=lambda v=var: self._browse(v))
+            button.grid(row=r, column=2, padx=4)
+            self.browse_buttons.append(button)
+        self.v_df_tol = tk.StringVar(value=f"{dwgdiff.DEFAULT_TOLERANCE:g}")
+        ttk.Label(df_form, text="座標容許誤差", width=12).grid(row=2, column=0, sticky="w", pady=2)
+        ttk.Entry(df_form, textvariable=self.v_df_tol, width=14).grid(row=2, column=1, sticky="w", pady=2, padx=4)
+        df_form.columnconfigure(1, weight=1)
+        self.v_df_handle = tk.BooleanVar(value=True)
+        ttk.Checkbutton(diff_box, text="以 handle 配對（新版若是重新繪製或從別的檔案複製，請取消，只用類型＋座標）",
+                        variable=self.v_df_handle).pack(anchor="w")
+        ttk.Checkbutton(diff_box, text="包含子資料夾（依相對路徑配對）",
+                        variable=self.opts["recursive"]).pack(anchor="w")
+        self.btn_diff = ttk.Button(diff_box, text="開始比對", command=self._start_dwgdiff)
+        self.btn_diff.pack(anchor="w", pady=(6, 0))
+
         # ---- 4 執行狀態 ----
         st = ttk.LabelFrame(main, text="④ 執行狀態")
         st.pack(fill="both", expand=True, **pad)
@@ -559,6 +596,9 @@ class App:
             ("文字取代", (("開啟 textreplace_changes.csv", "logs/textreplace_changes.csv"),
                       ("開啟 textreplace_results.csv", "logs/textreplace_results.csv"),
                       ("開啟 textreplace.log", "logs/textreplace.log"))),
+            ("圖面差異比對", (("開啟 dwgdiff_report.html", "logs/dwgdiff_report.html"),
+                        ("開啟 dwgdiff_changes.csv", "logs/dwgdiff_changes.csv"),
+                        ("開啟 dwgdiff_results.csv", "logs/dwgdiff_results.csv"))),
             ("自動分圖層", (("開啟 layerclass_moves.csv", "logs/layerclass_moves.csv"),
                        ("開啟 layerclass_results.csv", "logs/layerclass_results.csv"),
                        ("開啟 layerclass.log", "logs/layerclass.log"))),
@@ -668,7 +708,7 @@ class App:
         state = "disabled" if busy else "normal"
         for widget in (self.mode_buttons + self.browse_buttons +
                        [self.btn_scan, self.btn_versions, self.btn_analysis, self.btn_fontfix,
-                        self.btn_extract, self.btn_replace, self.btn_layer,
+                        self.btn_extract, self.btn_replace, self.btn_layer, self.btn_diff,
                         self.btn_files, self.btn_folder, self.btn_recheck, self.btn_save_config]):
             widget.configure(state=state)
         self.btn_start.configure(state="normal" if not busy and self.env_ok else "disabled")
@@ -676,6 +716,7 @@ class App:
         self.btn_extract.configure(state="normal" if not busy and self.env_ok else "disabled")
         self.btn_replace.configure(state="normal" if not busy and self.env_ok else "disabled")
         self.btn_layer.configure(state="normal" if not busy and self.env_ok else "disabled")
+        self.btn_diff.configure(state="normal" if not busy and self.env_ok else "disabled")
         cancellable = busy and self._can_stop
         self.btn_stop.configure(state="normal" if cancellable else "disabled")
         self._refresh_analysis_outputs()
@@ -1306,6 +1347,96 @@ class App:
         self._refresh_analysis_outputs()
         self._reveal(self.result_frame)
 
+    def _start_dwgdiff(self):
+        if self._busy():
+            return
+        if not self.env_ok:
+            messagebox.showerror("無法比對圖面", "找不到可用的 accoreconsole；請先完成環境設定並重新檢查。")
+            return
+        old = self.v_df_old.get().strip()
+        new = self.v_df_new.get().strip()
+        dst = self.v_out.get().strip()
+        problem = dwgdiff.folder_problem(old, new, dst)
+        if problem:
+            messagebox.showerror("路徑錯誤", problem)
+            return
+        try:
+            tolerance = float(self.v_df_tol.get().strip())
+        except ValueError:
+            tolerance = float("nan")
+        if not 0 <= tolerance < float("inf"):  # also rejects NaN
+            messagebox.showerror("座標容許誤差", "座標容許誤差必須是 0 或正數，例如 0.000001。")
+            return
+        use_handle = self.v_df_handle.get()
+        recursive = self.opts["recursive"].get()
+        timeout = int(self.cfg.get("timeout_seconds", 300))
+        accore = self.cfg.get("accoreconsole", "")
+        self.stop_event.clear()
+        self._can_stop = True
+        self.summary = None
+        self.v_progress.set(0)
+        self.v_ptext.set("")
+        self.v_current.set("")
+        self.v_result.set("比對圖面中...")
+        self._set_status("running", "圖面差異比對中…")
+
+        def work():
+            try:
+                result = dwgdiff.run(
+                    old, new, dst, accore, recursive=recursive, tolerance=tolerance,
+                    use_handle=use_handle, timeout=timeout, stop_event=self.stop_event,
+                    progress=lambda i, n, cur: self.q.put(("progress", "圖面差異比對", i, n, cur)),
+                    log=lambda level, message: self.q.put(("log", level, message)),
+                )
+            except Exception as exc:  # noqa: BLE001
+                result = dict(dwg=0, ok=0, failed=0, skipped=0, warnings=0, added=0, deleted=0,
+                              modified=0, unchanged=0, changed_files=0, unpaired=[], stopped=False,
+                              fatal=f"{type(exc).__name__}: {exc}", failed_files=[], elapsed=0)
+                common.log_error({"output_dir": dst}, f"dwgdiff crashed: {result['fatal']}")
+            self.q.put(("diff_done", result))
+
+        self.worker = threading.Thread(target=work, daemon=True)
+        self.worker.start()
+        self._set_busy_ui(True)
+
+    def _on_diff_done(self, result):
+        self.summary = result
+        self.worker = None
+        self._can_stop = False
+        self._set_busy_ui(False)
+        unpaired = result.get("unpaired", [])
+        if result.get("dwg", 0) == 0 and not result.get("fatal") and not result.get("stopped"):
+            state, verdict = "warning", "沒有可配對的 DWG（兩個資料夾沒有同名檔案）"
+        elif (unpaired and not result.get("fatal") and not result.get("stopped")
+              and not result.get("failed") and not result.get("failed_files")):
+            state, verdict = "warning", "比對完成，但有檔案只出現在其中一個資料夾"
+        else:
+            state, verdict = classify_outcome(result)
+        failed_files = result.get("failed_files", [])
+        shown = "\n".join(f"  - {friendly_failure(x)}" for x in failed_files[:8])
+        if len(failed_files) > 8:
+            shown += f"\n  ... 另有 {len(failed_files) - 8} 個（見 errors.log）"
+        lonely = "\n".join(f"  - {x}" for x in unpaired[:8])
+        if len(unpaired) > 8:
+            lonely += f"\n  ... 另有 {len(unpaired) - 8} 個（見 dwgdiff_results.csv）"
+        st = STATE[state]
+        self.v_result.set(
+            f"{st['symbol']} {st['label']}：{verdict}\n"
+            f"配對：{result.get('dwg', 0)}　成功：{result.get('ok', 0)}　"
+            f"失敗：{result.get('failed', 0)}　未配對：{len(unpaired)}\n"
+            f"新增：{result.get('added', 0)}　刪除：{result.get('deleted', 0)}　"
+            f"修改：{result.get('modified', 0)}　有差異的檔案：{result.get('changed_files', 0)}\n"
+            f"結果：logs/dwgdiff_report.html、logs/dwgdiff_changes.csv"
+            + (f"\n錯誤：{result['fatal']}" if result.get("fatal") else "")
+            + (f"\n\n未配對檔案：\n{lonely}" if unpaired else "")
+            + (f"\n\n失敗檔案：\n{shown}" if failed_files else "")
+        )
+        self._set_status(state, verdict)
+        if not result.get("fatal") and not result.get("stopped"):
+            self.v_progress.set(100)
+        self._refresh_analysis_outputs()
+        self._reveal(self.result_frame)
+
     # ---------- run ----------
     def _busy(self):
         return self.worker is not None and self.worker.is_alive()
@@ -1404,6 +1535,8 @@ class App:
                     self._on_replace_done(m[1])
                 elif k == "layer_done":
                     self._on_layer_done(m[1])
+                elif k == "diff_done":
+                    self._on_diff_done(m[1])
                 elif k == "env_paths":
                     self._on_env_paths(m[1], m[2])
                 elif k == "env":
