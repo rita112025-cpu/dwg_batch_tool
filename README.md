@@ -5,7 +5,7 @@
 
 | 項目 | 狀態 |
 | --- | --- |
-| 自動化測試 | 276 collected。無 AutoCAD 的環境為 254 passed / 22 skipped（含缺字體修復、自動分圖層、文字擷取／取代；`accore` 測試在 AutoCAD 2027 上才會執行） |
+| 自動化測試 | 295 collected。無 AutoCAD 的環境為 273 passed / 22 skipped（含缺字體修復、自動分圖層、文字擷取／取代、圖面差異比對；`accore` 測試在 AutoCAD 2027 上才會執行） |
 | Real project validation | SB12 Round 1 FAIL（v1.5）→ Round 2 PASS（P0 修正，v1.5.1）→ Round 3 PASS（P1 evidence metadata，v1.5.2）；見 [docs/REAL_PROJECT_VALIDATION_STATUS.md](docs/REAL_PROJECT_VALIDATION_STATUS.md) |
 | Production Approval | NOT APPROVED |
 | 版本標籤 | `v1.6.0`（前版 `v1.5.2`、`v1.5.1`、`v1.5-semantic-validation-candidate`） |
@@ -177,6 +177,66 @@ MTEXT 會把新的純文字嵌回原本的格式碼，所以沒改到的字仍�
 3. 取消預覽再跑。原始檔時間不變。輸出 DWG 裡聚合線在 `PL`、文字在 `TST`、填充在 `H`、圖塊在以圖塊名稱命名的圖層。新圖層顏色為 1–9，舊圖層顏色沒變。
 4. 取消「保持原外觀」再輸出到另一個資料夾，BYLAYER 的線應跟著新圖層變色；勾著時外觀應接近原圖。
 5. 放一個鎖住的圖層，沒勾解鎖時該層物件留在原地，結果列出略過的圖層；勾選後物件會搬走，圖層仍是鎖定。
+
+### 圖面差異比對
+「② 我要做什麼？」選擇「圖面差異比對」。在本工作設定選「舊版資料夾」與「新版資料夾」，結果寫到上方的「輸出資料夾」（不可與舊版或新版相同，也不可放在它們裡面）。上方的「輸入資料夾」在這個模式不使用。
+
+```mermaid
+flowchart TD
+    A[舊版資料夾 / 新版資料夾] --> B[依相對路徑配對 DWG<br/>不分大小寫]
+    B -->|只出現在一邊| U[只有舊版 / 只有新版]
+    B -->|配對成功| C[複製到 ASCII 暫存檔<br/>記錄 SHA-256]
+    C --> D[accoreconsole 載入 dwgdiff_dump.lsp<br/>OPEN 暫存檔，不存檔]
+    D --> E["每個圖元一列 DIFFROW<br/>圖塊屬性一列 DIFFATTR<br/>欄位以 #124;=#124; 分隔"]
+    E --> F{筆數與 SUMMARY 相符<br/>且沒有 DIFF_ERROR?}
+    F -->|否| X[該組 失敗]
+    F -->|是| G[第一輪：handle 相同且類型相同]
+    G --> H[第二輪：類型 + 配置 + 插入點<br/>在容許誤差內]
+    H --> I[新增 / 刪除 / 修改 / 未變更]
+    I --> J[logs/dwgdiff_changes.csv<br/>logs/dwgdiff_report.html]
+    C --> K[比對後再算一次 SHA-256<br/>來源被改動則該組 失敗]
+```
+
+LISP（`scripts\dwgdiff_dump.lsp`）只讀圖：走訪模型空間與所有配置的圖元（`ssget "_X"`），不走圖塊定義內部，不呼叫 `entmod`／`entmake`，script 裡也沒有 `QSAVE`／`SAVEAS`。每個圖元輸出：
+- handle、物件類型、配置、圖層、插入點 X/Y/Z（DXF 群組 10；`LWPOLYLINE` 的 Z 用標高群組 38）。
+- 尺寸／幾何：`LINE` 終點與長度、`CIRCLE`／`ARC` 半徑與角度、`ELLIPSE` 長軸與比例、`TEXT`／`MTEXT`／`ATTDEF` 字高、寬度、旋轉角、`INSERT` X/Y/Z 比例與旋轉角、`DIMENSION` 標註值、`LWPOLYLINE`／`POLYLINE` 頂點數、封閉與所有頂點座標、`HATCH` 樣式／比例／角度／邊界數、`SPLINE` 階數與點數。
+- 文字內容：`TEXT`、`MTEXT`（含格式碼原文）、`ATTDEF`（預設值）、`DIMENSION`（覆寫文字）、`MULTILEADER`。
+- 圖塊名稱（`INSERT` 的群組 2）與每個屬性的 TAG／值。
+
+欄位用 `|=|` 分隔，欄位內的 `\`、換行、定位字元與 `|=|` 會跳脫，解析方式與缺字體修復、文字擷取相同。
+
+配對與分類：
+1. 先用 handle：舊版與新版 handle 相同且物件類型相同，算同一個圖元（比對方式欄寫「handle」）。handle 相同但類型不同，視為不同圖元。
+2. 剩下的用「類型＋配置＋插入點」配對，X/Y/Z 差距都在「座標容許誤差」內才算（比對方式欄寫「座標+類型」）。附近有多個候選時，選不同屬性最少的那個。
+3. 舊版沒配到的是「刪除」，新版沒配到的是「新增」。配到但有屬性不同的是「修改」，每個不同的屬性一列（圖層、配置、位置、各項尺寸、文字內容、圖塊名稱、`屬性 TAG`）。數值在容許誤差內視為相同；`INSERT` 沒寫出的比例視為 1、旋轉角視為 0。
+4. 預設容許誤差 `0.000001`（圖面單位）。新版若是重新繪製或從別的檔案複製而來，handle 可能剛好重複卻是不同的東西，這時取消「以 handle 配對」，只用類型＋座標。
+
+結果在輸出資料夾的 `logs\`（CSV 為 UTF-8 含 BOM）：
+- `dwgdiff_changes.csv`：一個變更一列。欄位為比對檔案、舊版檔案、新版檔案、變更類型（新增／刪除／修改）、比對方式、舊 handle、新 handle、物件類型、配置、圖層、X、Y、變更屬性、舊值、新值。新增與刪除的「變更屬性」空白，值欄寫物件摘要（例如 `TEXT「PUMP-01」`）。
+- `dwgdiff_report.html`：單一 HTML 檔，不載入外部資源。上方是每組檔案的狀態與數量，下方每組可展開看變更明細（每組最多顯示 2000 筆，其餘看 CSV）。
+- `dwgdiff_results.csv`／`.jsonl`：每組一列，狀態為「無差異」「有差異」「失敗」「已停止」「只有舊版」「只有新版」。
+- `dwgdiff.log`、`dwgdiff_batch_*.stdout.log`。
+
+結果判定：輸出圖元數與 `DIFFDUMP_SUMMARY` 不符、或 LISP 回報 `DIFF_ERROR` 時，該組記為失敗，不會把漏掉的圖元當成刪除。某張圖讓 AutoCAD 跳出錯誤對話框時，只有那一組失敗，其餘檔案在新的 accoreconsole 繼續。
+
+CLI：
+```
+.venv\Scripts\python scripts\dwgdiff.py <舊版資料夾> <新版資料夾> <輸出資料夾> [--tolerance 0.001] [--no-handle] [--no-recursive]
+```
+
+限制：
+- 只比對模型空間與配置上的圖元；圖塊定義內部的變更只會在插入的圖塊名稱、比例、屬性等有變時出現。外部參考的內容不比對。
+- 動態圖塊用群組 2 的名稱（可能是 `*U` 匿名名稱），不是有效名稱。
+- `HATCH` 的群組 10 是標高點（多半是 0,0），座標配對對填充的辨識力有限；handle 配對不受影響。
+- `SPLINE` 只比對階數與點數，不比對每個控制點；`3DSOLID`、`REGION` 等沒有列出尺寸的類型只比對圖層、配置，以及有群組 10 時的位置。
+- 欄位前後的空白在解析時會去掉，只差在頭尾空白的文字不會被列為修改。
+- 雲端測試環境沒有 AutoCAD：LISP 只做了括號平衡、唯讀與 script 內容的靜態檢查，accoreconsole 部分以 `tests\fake_accoreconsole.py` 模擬。尚未在 AutoCAD 2027 上實際執行。
+
+本機確認（Windows、AutoCAD 2027，不是 LT）：
+1. `git pull` 這個分支後，把一張 DWG 複製到「舊版」資料夾，在 AutoCAD 裡另存一份到「新版」資料夾（同檔名），在新版裡改一段文字、移動一個圖塊、刪一條線、加一個圓。
+2. 選「圖面差異比對」，選兩個資料夾與另一個輸出資料夾，按「開始比對」。
+3. 開啟 `logs\dwgdiff_report.html`，確認四種變更都有出現，且修改列出的屬性正確；原始兩個 DWG 的修改時間不變。
+4. 取消「以 handle 配對」再跑一次，被移動的圖塊應變成一筆刪除加一筆新增。
 
 ### 桌面捷徑
 雙擊 `create_shortcut.bat` 會在桌面建立「DWG分析」捷徑（圖示為 `dwg_analysis.ico`）。
