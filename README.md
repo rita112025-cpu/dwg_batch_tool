@@ -184,6 +184,19 @@ MTEXT 會把新的純文字嵌回原本的格式碼，所以沒改到的字仍�
 4. 取消「保持原外觀」再輸出到另一個資料夾，BYLAYER 的線應跟著新圖層變色；勾著時外觀應接近原圖。
 5. 放一個鎖住的圖層，沒勾解鎖時該層物件留在原地，結果列出略過的圖層；勾選後物件會搬走，圖層仍是鎖定。
 
+### 差異比對
+比對兩版圖面，列出哪裡改了。原始圖檔不會被修改。
+- 輸入：舊版、新版各選一個檔案，或各選一個資料夾。資料夾依相對路徑配對，副檔名不計（`舊\A\x.dwg` 對 `新\A\x.dxf`）。只在一邊出現的檔案列為 `ONLY_IN_OLD` / `ONLY_IN_NEW`。
+- DWG 先用 accoreconsole 轉成 DXF（存在 `輸出\dwgdiff\dxf\`），DXF 直接讀。只比 DXF 時不需要 AutoCAD。
+- 比對內容：圖層（新增／刪除／顏色、線型、線寬、開關、凍結、鎖定、出圖）、圖塊插入與屬性值、TEXT／MTEXT 內容、標註的量測值與覆寫文字、一般物件的新增／刪除／移動。
+- 物件配對：先用 handle，handle 對不上時用「類型＋圖層＋配置＋幾何指紋」，再用「座標差都在容差內」。座標容差預設 `0.001`。取消「優先以 handle 配對」就只用幾何配對。
+- 輸出（`輸出\dwgdiff\`）：`diff_summary.csv`（每組檔案一列：狀態、新增／刪除／修改數、各類別數量）、`diff_details.csv`（每筆變更：file、category、change_type=ADDED/REMOVED/MODIFIED、layer、handle、field、before、after、position）、`diff_report.json`（同樣內容加比對參數）。
+
+命令列：
+```
+.venv\Scripts\python scripts\dwgdiff.py <舊版> <新版> <輸出資料夾> [--accore <accoreconsole.exe>] [--tolerance 0.001] [--no-handles]
+```
+
 ### 桌面捷徑
 雙擊 `create_shortcut.bat` 會在桌面建立「DWG分析」捷徑（圖示為 `dwg_analysis.ico`）。
 捷徑存的是絕對路徑：**搬移或改名資料夾後，捷徑與圖示都會失效**，在新位置再執行一次 `create_shortcut.bat` 即可。
