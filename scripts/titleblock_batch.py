@@ -283,11 +283,8 @@ def run_write(
     except OSError as exc:
         summary["fatal"] = f"輸出資料夾無法寫入：{exc}"
         return summary
-    groups, missing = _group_rows(rows, input_dir)
-    keys = list(groups)
-    summary["dwg"] = len(keys) + len(missing)
     label = "預覽" if dry_run else "圖框屬性寫回"
-    _log_line(text_log, f"{label}開始: {csv_path} -> {output_dir}，共 {summary['dwg']} 個檔案")
+    _log_line(text_log, f"{label}開始: {csv_path} -> {output_dir}")
     temps = []
 
     def emit(file_text, output, records):
@@ -301,6 +298,10 @@ def run_write(
         jsonl_file.flush()
 
     try:
+        groups, missing = _group_rows(rows, input_dir)
+        keys = list(groups)
+        summary["dwg"] = len(keys) + len(missing)
+        _log_line(text_log, f"共 {summary['dwg']} 個檔案")
         for key, group in missing.items():
             summary["failed"] += 1
             error = "找不到來源 DWG" if key else "CSV 的 file 欄是空的"

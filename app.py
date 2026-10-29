@@ -22,6 +22,8 @@ import dwgtext  # noqa: E402
 import textbatch  # noqa: E402
 import layerclass  # noqa: E402
 import layerbatch  # noqa: E402
+import titleblock  # noqa: E402
+import titleblock_batch  # noqa: E402
 
 try:  # crisp text on high-DPI Windows displays
     import ctypes
@@ -58,6 +60,7 @@ PRIMARY_RESULTS = {
     "textextract": ("logs/textextract_hits.csv",),
     "textreplace": ("logs/textreplace_changes.csv",),
     "layerclass": ("logs/layerclass_moves.csv",),
+    "titleblock": ("logs/titleblock_results.csv", "titleblock_attrs.csv"),
     "dwg": ("csv/scada_hits.csv", "csv/file_index.csv"),
     "analysis": ("cross_reference/cross_reference.csv", "database/project.db"),
 }
@@ -243,7 +246,7 @@ class App:
         self.mode_buttons = []
         modes = (("scan", "掃描資料夾"), ("version", "DWG / DWT 版本表"), ("fontfix", "缺字體修復"),
                  ("layerclass", "自動分圖層"),
-                 ("textextract", "文字擷取"), ("textreplace", "文字取代"),
+                 ("textextract", "文字擷取"), ("textreplace", "文字取代"), ("titleblock", "圖框屬性"),
                  ("dwg", "DWG 轉 DXF + 解析"), ("analysis", "工程資料分析"))
         for i, (value, text) in enumerate(modes):
             radio = ttk.Radiobutton(radio_row, text=text, value=value, variable=self.v_mode,
@@ -437,6 +440,8 @@ class App:
         self.btn_replace = ttk.Button(replace, text="開始取代文字", command=self._start_replace)
         self.btn_replace.pack(anchor="w", pady=(8, 0))
 
+        self._build_titleblock()
+
         layer_box = ttk.Frame(self.mode_frame)
         self.mode_frames["layerclass"] = layer_box
         ttk.Label(layer_box, text="自動分圖層",
@@ -559,6 +564,9 @@ class App:
             ("文字取代", (("開啟 textreplace_changes.csv", "logs/textreplace_changes.csv"),
                       ("開啟 textreplace_results.csv", "logs/textreplace_results.csv"),
                       ("開啟 textreplace.log", "logs/textreplace.log"))),
+            ("圖框屬性", (("開啟 titleblock_attrs.csv", "titleblock_attrs.csv"),
+                      ("開啟 titleblock_results.csv", "logs/titleblock_results.csv"),
+                      ("開啟 titleblock.log", "logs/titleblock.log"))),
             ("自動分圖層", (("開啟 layerclass_moves.csv", "logs/layerclass_moves.csv"),
                        ("開啟 layerclass_results.csv", "logs/layerclass_results.csv"),
                        ("開啟 layerclass.log", "logs/layerclass.log"))),
@@ -676,6 +684,7 @@ class App:
         self.btn_extract.configure(state="normal" if not busy and self.env_ok else "disabled")
         self.btn_replace.configure(state="normal" if not busy and self.env_ok else "disabled")
         self.btn_layer.configure(state="normal" if not busy and self.env_ok else "disabled")
+        self._tb_set_busy(busy)
         cancellable = busy and self._can_stop
         self.btn_stop.configure(state="normal" if cancellable else "disabled")
         self._refresh_analysis_outputs()
@@ -1210,6 +1219,129 @@ class App:
             "logs/textreplace_changes.csv",
         )
 
+    # ---------- title-block attributes ----------
+    def _build_titleblock(self):
+        box = ttk.Frame(self.mode_frame)
+        self.mode_frames["titleblock"] = box
+        ttk.Label(box, text="圖框屬性",
+                  font=(tkfont.nametofont("TkDefaultFont").actual("family"), 11)).pack(anchor="w")
+        ttk.Label(
+            box,
+            text=("匯出：把符合名稱的圖框 Block 屬性寫成輸出資料夾裡的 titleblock_attrs.csv"
+                  "（每個圖框一列，每個 tag 一欄），可用 Excel 編輯。\n"
+                  "寫回：讀回編輯過的 CSV，只把和圖面不同的值寫回。每個 DWG 先複製到暫存檔處理，"
+                  "原始圖檔不會被改寫，變更後的 DWG 寫到輸出資料夾。"),
+            justify="left", wraplength=760,
+        ).pack(anchor="w", pady=(2, 6))
+        form = ttk.Frame(box)
+        form.pack(fill="x")
+        self.v_tb_blocks = tk.StringVar(value="TITLE*, 圖框*")
+        self.v_tb_csv = tk.StringVar()
+        ttk.Label(form, text="圖框 Block 名稱", width=14).grid(row=0, column=0, sticky="w", pady=2)
+        ttk.Entry(form, textvariable=self.v_tb_blocks).grid(row=0, column=1, sticky="ew", pady=2)
+        ttk.Label(form, text="寫回用 CSV", width=14).grid(row=1, column=0, sticky="w", pady=2)
+        ttk.Entry(form, textvariable=self.v_tb_csv).grid(row=1, column=1, sticky="ew", pady=2)
+        self.btn_tb_csv = ttk.Button(form, text="選擇…", command=self._browse_tb_csv)
+        self.btn_tb_csv.grid(row=1, column=2, padx=(6, 0), pady=2)
+        form.columnconfigure(1, weight=1)
+        ttk.Label(box, text="名稱可用 * 與 ?，多個以逗號分隔；動態圖塊以有效名稱比對。").pack(anchor="w")
+        self.v_tb_dry = tk.BooleanVar(value=False)
+        self.v_tb_overwrite = tk.BooleanVar(value=False)
+        ttk.Checkbutton(box, text="匯出時包含子資料夾", variable=self.opts["recursive"]).pack(anchor="w")
+        ttk.Checkbutton(box, text="寫回時只預覽變更，不輸出 DWG", variable=self.v_tb_dry).pack(anchor="w")
+        ttk.Checkbutton(box, text="覆寫既有的輸出 DWG", variable=self.v_tb_overwrite).pack(anchor="w")
+        buttons = ttk.Frame(box)
+        buttons.pack(anchor="w", pady=(8, 0))
+        self.btn_tb_read = ttk.Button(buttons, text="匯出圖框屬性", command=self._start_tb_read)
+        self.btn_tb_read.pack(side="left")
+        self.btn_tb_write = ttk.Button(buttons, text="寫回圖框屬性", command=self._start_tb_write)
+        self.btn_tb_write.pack(side="left", padx=6)
+
+    def _tb_set_busy(self, busy):
+        self.btn_tb_csv.configure(state="disabled" if busy else "normal")
+        for button in (self.btn_tb_read, self.btn_tb_write):
+            button.configure(state="normal" if not busy and self.env_ok else "disabled")
+
+    def _browse_tb_csv(self):
+        path = filedialog.askopenfilename(title="選擇 titleblock_attrs.csv",
+                                          filetypes=[("CSV", "*.csv"), ("所有檔案", "*.*")])
+        if path:
+            self.v_tb_csv.set(path)
+
+    def _tb_start(self, title, running, done_kind, call):
+        """Shared start path for both title-block jobs. ``call`` runs in the worker thread."""
+        if self._busy():
+            return
+        if not self.env_ok:
+            messagebox.showerror(title, "找不到可用的 accoreconsole；請先完成環境設定並重新檢查。")
+            return
+        folders = self._text_folders()
+        if folders is None:
+            return
+        src, dst = folders
+        timeout = int(self.cfg.get("timeout_seconds", 300))
+        accore = self.cfg.get("accoreconsole", "")
+        self.stop_event.clear()
+        self._can_stop = True
+        self.summary = None
+        self.v_progress.set(0)
+        self.v_ptext.set("")
+        self.v_current.set("")
+        self.v_result.set(f"{running}...")
+        self._set_status("running", f"{running}…")
+
+        def work():
+            try:
+                result = call(
+                    src, dst, accore, timeout=timeout, stop_event=self.stop_event,
+                    progress=lambda i, n, cur: self.q.put(("progress", title, i, n, cur)),
+                    log=lambda level, message: self.q.put(("log", level, message)),
+                )
+            except Exception as exc:  # noqa: BLE001
+                result = dict(dwg=0, ok=0, failed=0, skipped=0, warnings=0, blocks=0, changes=0,
+                              unchanged=0, stopped=False, fatal=f"{type(exc).__name__}: {exc}",
+                              failed_files=[], elapsed=0, csv="")
+                common.log_error({"output_dir": dst}, f"titleblock crashed: {result['fatal']}")
+            self.q.put((done_kind, result))
+
+        self.worker = threading.Thread(target=work, daemon=True)
+        self.worker.start()
+        self._set_busy_ui(True)
+
+    def _start_tb_read(self):
+        patterns = self.v_tb_blocks.get()
+        problem = titleblock.validate_patterns(patterns)
+        if problem and self.env_ok:
+            messagebox.showerror("圖框 Block 名稱", problem)
+            return
+        recursive = self.opts["recursive"].get()
+        self._tb_start("匯出圖框屬性", "匯出圖框屬性中", "tb_read_done",
+                       lambda *args, **kwargs: titleblock_batch.run_read(
+                           *args, patterns=patterns, recursive=recursive, **kwargs))
+
+    def _start_tb_write(self):
+        csv_path = self.v_tb_csv.get().strip()
+        if not csv_path and self.env_ok:
+            messagebox.showerror("寫回圖框屬性", "請選擇編輯過的 titleblock_attrs.csv（CSV 檔）")
+            return
+        dry_run = self.v_tb_dry.get()
+        overwrite = self.v_tb_overwrite.get()
+        self._tb_start("寫回圖框屬性", "預覽圖框屬性寫回中" if dry_run else "寫回圖框屬性中", "tb_write_done",
+                       lambda *args, **kwargs: titleblock_batch.run_write(
+                           *args, csv_path=csv_path, dry_run=dry_run, overwrite=overwrite, **kwargs))
+
+    def _on_tb_read_done(self, result):
+        if result.get("csv"):
+            self.v_tb_csv.set(result["csv"])
+        self._on_text_done(result, "匯出圖框屬性", f"圖框數：{result.get('blocks', 0)}", "titleblock_attrs.csv")
+
+    def _on_tb_write_done(self, result):
+        self._on_text_done(
+            result, "寫回圖框屬性",
+            f"變更筆數：{result.get('changes', 0)}　無變更：{result.get('unchanged', 0)}",
+            "logs/titleblock_results.csv",
+        )
+
     def _start_layerclass(self):
         if self._busy():
             return
@@ -1402,6 +1534,10 @@ class App:
                     self._on_extract_done(m[1])
                 elif k == "replace_done":
                     self._on_replace_done(m[1])
+                elif k == "tb_read_done":
+                    self._on_tb_read_done(m[1])
+                elif k == "tb_write_done":
+                    self._on_tb_write_done(m[1])
                 elif k == "layer_done":
                     self._on_layer_done(m[1])
                 elif k == "env_paths":
