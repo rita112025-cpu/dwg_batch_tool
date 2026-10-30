@@ -259,6 +259,8 @@ def compare_entities(before, after, tolerance):
     category = after["category"]
     if before["layer"] != after["layer"]:
         changes.append(_change(category, MODIFIED, after, "layer", before["layer"], after["layer"]))
+    if before["layout"] != after["layout"]:
+        changes.append(_change(category, MODIFIED, after, "layout", before["layout"], after["layout"]))
     if not geom_close(before["geom"], after["geom"], tolerance):
         changes.append(_change(category, MODIFIED, after, "geometry",
                                _fmt_geom(before["geom"]), _fmt_geom(after["geom"])))
@@ -522,9 +524,9 @@ def run(
     for index, (label, old_path, new_path) in enumerate(pairs):
         for side, path in (("old", old_path), ("new", new_path)):
             if path is not None and path.suffix.lower() == ".dwg":
+                # One DWG can be on both sides (or in several pairs): convert it once.
                 target = out_dir / "dxf" / side / f"{index:04d}_{path.stem}.dxf"
-                conversions[path] = target
-                sides[(index, side)] = target
+                sides[(index, side)] = conversions.setdefault(path, target)
             elif path is not None:
                 sides[(index, side)] = path
     errors = _convert(conversions, accore, out_root, timeout, stop_event, on_progress)

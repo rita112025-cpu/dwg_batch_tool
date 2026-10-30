@@ -462,7 +462,7 @@ def build_apply_lisp(edits_by_index):
 def _build_script(jobs, lisp_path, call_of, save):
     lines = dwgtext._preamble(lisp_path)
     for i, job in enumerate(jobs):
-        func = call_of(i)
+        func = call_of(i, job)
         lines.append("_.OPEN")
         lines.append(f'"{job["spath"]}"')
         lines.append(f'(princ (strcat "\\nDWGB" "ATCH_OPEN_{i}|" (getvar "DWGNAME") "|\\n"))')
@@ -480,8 +480,10 @@ def _build_script(jobs, lisp_path, call_of, save):
 
 
 def build_dump_script(jobs, lisp_path):
-    return _build_script(jobs, lisp_path, lambda _i: "tb-dump-current", False)
+    return _build_script(jobs, lisp_path, lambda _i, _job: "tb-dump-current", False)
 
 
 def build_apply_script(jobs, lisp_path):
-    return _build_script(jobs, lisp_path, lambda i: f"tb-apply-{i}", True)
+    # tb-apply-N is numbered over the whole apply list; the OPEN/DONE markers count
+    # within this launch, which restarts from the remaining files after a stall.
+    return _build_script(jobs, lisp_path, lambda i, job: f"tb-apply-{job.get('apply_index', i)}", True)

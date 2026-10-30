@@ -107,7 +107,9 @@ def _messages_for(script_text: str) -> list[str]:
                 if TB_NOREADY not in payload:
                     messages.append("TBDUMP_READY")
             elif tb_apply:
-                messages.extend(_tb_apply_rows(script_text, number))
+                # The function called on the next script line, as AutoCAD would run it.
+                called = re.search(r"tb-apply-(\d+)", lines[index + 1]) if index + 1 < len(lines) else None
+                messages.extend(_tb_apply_rows(script_text, called.group(1) if called else number))
             elif text_dump:
                 messages.extend(_TEXT_DUMP)
             elif text_apply:

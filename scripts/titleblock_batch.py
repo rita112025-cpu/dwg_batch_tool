@@ -344,7 +344,8 @@ def run_write(
             apply_lisp = apply_jobs[0]["tmp_in"].parent / "titleblock_apply.lsp"
             apply_lisp.write_bytes(fontfix.lisp_bytes(titleblock.build_apply_lisp(
                 [job["edits"] for job in apply_jobs])))
-            for job in apply_jobs:
+            for index, job in enumerate(apply_jobs):
+                job["apply_index"] = index
                 for field in ("console", "opened_name", "launch_error", "stopped_here"):
                     job.pop(field, None)
             stopped = textbatch._launch_all(
@@ -417,6 +418,10 @@ def _finish_apply(job):
         return
     if job.get("stopped_here") or not job.get("console"):
         rec["status"], rec["error"] = "STOPPED", "已停止"
+        return
+    opened = job.get("opened_name") or ""
+    if opened and opened.casefold() != Path(job["spath"]).name.casefold():
+        rec["status"], rec["error"] = "FAILED", f"開啟的圖面與預期不同（{opened}）"
         return
     applied = titleblock.parse_apply(job["console"])
     if applied["summary"] is None:

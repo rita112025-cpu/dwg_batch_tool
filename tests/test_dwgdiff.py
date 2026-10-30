@@ -151,6 +151,24 @@ def test_folder_pairing_and_dwg_conversion(tmp_path):
     assert "DWG 轉 DXF" in stages
 
 
+def test_entity_moved_between_layouts_is_reported():
+    rec = {"category": "ENTITY", "type": "LINE", "layer": "0", "layout": "Model", "handle": "A1",
+           "geom": {}, "content": {}, "props": {}, "attribs": {}, "position": ""}
+    changes = dwgdiff.compare_entities(rec, dict(rec, layout="Layout1"), 0.001)
+    assert [(c["field"], c["before"], c["after"]) for c in changes] == [("layout", "Model", "Layout1")]
+
+
+def test_same_dwg_on_both_sides_is_converted_once(tmp_path):
+    _save(_base(), tmp_path / "tmp.dxf")
+    drawing = tmp_path / "same.dwg"
+    drawing.write_bytes((tmp_path / "tmp.dxf").read_bytes())
+    wrapper = tmp_path / "accore.cmd"
+    wrapper.write_text(f'@"{sys.executable}" "{FAKE}" %*\n', encoding="ascii")
+    result = dwgdiff.run(drawing, drawing, tmp_path / "out", str(wrapper))
+    assert result["failed"] == 0, result["failed_files"]
+    assert result["identical"] == 1
+
+
 def test_dwg_without_accore_fails_pair(tmp_path):
     a = tmp_path / "a.dwg"
     a.write_bytes(b"AC1032")

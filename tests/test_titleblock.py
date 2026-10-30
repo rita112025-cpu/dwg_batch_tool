@@ -392,6 +392,38 @@ def _apply_job(tmp_path, console, **extra):
     return job
 
 
+def test_apply_script_keeps_edit_index_after_a_relaunch():
+    # After a stall the remaining jobs relaunch: markers restart at 0, edits must not.
+    remaining = [{"spath": "C:/temp/in_c.dwg", "apply_index": 2}]
+    script = titleblock.build_apply_script(remaining, "C:/temp/tb.lsp")
+    assert "(tb-apply-2)" in script and "(tb-apply-0)" not in script
+    assert "ATCH_OPEN_0|" in script
+
+
+def test_write_gives_each_drawing_a_stable_apply_index(tmp_path, monkeypatch):
+    src, _drawing, csv_path = _exported(tmp_path)
+    rows = _rows(csv_path)
+    rows[0]["TITLE"] = "二樓平面圖"
+    _write_rows(csv_path, rows, list(rows[0]))
+    seen = []
+    real = titleblock.build_apply_script
+
+    def spy(jobs, lisp_path):
+        seen.extend(job["apply_index"] for job in jobs)
+        return real(jobs, lisp_path)
+
+    monkeypatch.setattr(titleblock, "build_apply_script", spy)
+    summary = _write(src, tmp_path / "out", csv_path)
+    assert summary["ok"] == 1 and seen == [0]
+
+
+def test_finish_apply_rejects_the_wrong_drawing(tmp_path):
+    job = _apply_job(tmp_path, "TBAPPLY_SUMMARY|=|1|=|0\n", opened_name="other.dwg", spath="C:/t/in_a.dwg")
+    titleblock_batch._finish_apply(job)
+    assert job["rec"]["status"] == "FAILED" and "other.dwg" in job["rec"]["error"]
+    assert not job["dest"].exists()
+
+
 def test_finish_apply_branches(tmp_path, monkeypatch):
     job = _apply_job(tmp_path, "", launch_error="超時")
     titleblock_batch._finish_apply(job)
