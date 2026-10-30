@@ -8,6 +8,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from common import load_config, resolve, log_error
 from convert_batch import convert_many
+from parallel import clamp_workers
 
 FIELDS = ["source", "output", "status", "return_code", "file_size", "elapsed_seconds", "error"]
 OK_STATUS = ("DXF_VALID", "SKIPPED_EXISTS")
@@ -75,7 +76,8 @@ def run(cfg, log=None, progress=None, stop_event=None):
                 log("INFO", "continue with next file")
 
         res = convert_many(items, accore, cfg, cfg.get("timeout_seconds", 300),
-                           cfg.get("overwrite", False), stop_event, progress, on_result)
+                           cfg.get("overwrite", False), stop_event, progress, on_result,
+                           workers=clamp_workers(cfg.get("workers", 1)))
         if any(r["status"] == "STOPPED" for r in res):
             stats["stopped"] = True
             log("WARN", "stopped while converting")

@@ -8,6 +8,7 @@ Mechanism (all verified on AutoCAD 2027 accoreconsole):
   * a corrupt DWG makes AutoCAD show a MessageBox and stall -> detected from stdout, that file is
     failed, the process is killed (only our own PID) and restarted for the remaining files
   * a wrong document being saved (OPEN failed silently) is caught by comparing DWGNAME
+  * ``workers`` > 1 splits the files over that many accoreconsole processes running at once
 """
 import os
 import re
@@ -20,6 +21,7 @@ import uuid
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import parallel
 from common import resolve, log_error, decode_console
 from convert_single import sha256, validate_dxf, safe_tmpdir, _terminate, publish_dxf
 
@@ -165,9 +167,10 @@ def _run_launch(jobs, accore, cfg, timeout, stop_event, on_start, finalize, tmpd
 
 
 def convert_many(items, accore, cfg, timeout=300, overwrite=False, stop_event=None,
-                 on_start=None, on_result=None):
+                 on_start=None, on_result=None, workers=1):
     """items: list of (dwg, dxf). on_start(index, total, dwg_path); on_result(rec).
-    Returns list of records; the last one has status STOPPED if the user stopped."""
+    Returns list of records; the last one has status STOPPED if the user stopped.
+    With ``workers`` > 1, on_start / on_result are still called one at a time."""
     on_start = on_start or (lambda i, n, p: None)
     on_result = on_result or (lambda r: None)
     logs = resolve(cfg, "output_dir") / "logs"
@@ -177,8 +180,13 @@ def convert_many(items, accore, cfg, timeout=300, overwrite=False, stop_event=No
     jobs = []
     tmpdir = safe_tmpdir(logs)
     copies = []
+    emit_lock = threading.Lock()
 
     def emit(rec):
+        with emit_lock:
+            _emit(rec)
+
+    def _emit(rec):
         if rec["status"] not in ("DXF_VALID", "SKIPPED_EXISTS", "STOPPED"):
             log_error(cfg, f"{rec['source']} -> {rec['status']} rc={rec['return_code']} {rec['error']}")
         results.append(rec)
@@ -213,9 +221,7 @@ def convert_many(items, accore, cfg, timeout=300, overwrite=False, stop_event=No
             rec["status"], rec["error"] = "ERROR", f"{type(e).__name__}: {e}"
             jobs.append(dict(rec=rec, skip=True, index=idx))
 
-    deferred = []
-
-    def finalize(job, opened_name, elapsed, retries=2):
+    def finalize(job, opened_name, elapsed, deferred, retries=2):
         try:
             _finalize(job, opened_name, elapsed, retries)
         except _Locked:
@@ -256,28 +262,29 @@ def convert_many(items, accore, cfg, timeout=300, overwrite=False, stop_event=No
             rec["status"], rec["error"] = "SOURCE_MODIFIED", rec["error"] + " source DWG hash changed!"
         emit(rec)
 
-    try:
-        todo = [j for j in jobs if not j["skip"]]
+    def _run_group(group):
+        """Convert ``group`` in one accoreconsole (relaunched after a stall). Returns the
+        job the user stopped at, or None."""
+        deferred = []
         pos = 0
-        while pos < len(todo):
+        while pos < len(group):
             if stop_event is not None and stop_event.is_set():
-                results.append(dict(_new_rec(todo[pos]["dwg"], todo[pos]["dxf"]), status="STOPPED"))
-                return _finish(results, copies)
-            chunk = todo[pos:]
+                return group[pos]
+            chunk = group[pos:]
             on_start(chunk[0]["index"] + 1, total, str(chunk[0]["dwg"]))
             def _on_start(job):
                 on_start(job["index"] + 1, total, str(job["dwg"]))
             consumed, stopped, fail_msg, rc = _run_launch(
-                chunk, accore, cfg, timeout, stop_event, _on_start, finalize, tmpdir, logs, None)
+                chunk, accore, cfg, timeout, stop_event, _on_start,
+                lambda job, name, elapsed: finalize(job, name, elapsed, deferred),
+                tmpdir, logs, None)
             pos += consumed
             pending_moves = list(deferred)  # process is gone now, temp files are released
             deferred.clear()
             for d in pending_moves:
-                finalize(*d, retries=40)
+                finalize(*d, deferred, retries=40)
             if stopped:
-                results.append(dict(_new_rec(todo[pos]["dwg"], todo[pos]["dxf"]), status="STOPPED",
-                                    error="stopped by user"))
-                return _finish(results, copies)
+                return group[pos] if pos < len(group) else None
             if consumed < len(chunk) and fail_msg:
                 bad = chunk[consumed]
                 rec = bad["rec"]
@@ -285,6 +292,16 @@ def convert_many(items, accore, cfg, timeout=300, overwrite=False, stop_event=No
                 _rm(bad["tmp_path"])
                 emit(rec)
                 pos += 1
+        return None
+
+    try:
+        todo = [j for j in jobs if not j["skip"]]
+        stopped_at = [job for job in parallel.run_groups(parallel.split(todo, workers), _run_group) if job]
+        if stopped_at:
+            first = min(stopped_at, key=lambda job: job["index"])
+            results.append(dict(_new_rec(first["dwg"], first["dxf"]), status="STOPPED",
+                                error="stopped by user"))
+            return _finish(results, copies)
         for j in jobs:
             if j["skip"]:
                 emit(j["rec"])

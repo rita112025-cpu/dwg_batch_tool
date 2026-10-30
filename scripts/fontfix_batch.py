@@ -19,12 +19,14 @@ import shutil
 import stat
 import subprocess
 import sys
+import threading
 import time
 import uuid
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import fontfix  # noqa: E402
+import parallel  # noqa: E402
 from common import decode_console, log_error  # noqa: E402
 from convert_batch import (  # noqa: E402
     DONE_RE,
@@ -243,6 +245,7 @@ def run(
     version="",
     overwrite=False,
     timeout=300,
+    workers=1,
     stop_event=None,
     progress=None,
     log=None,
@@ -299,8 +302,13 @@ def run(
     )
     done_count = 0
     temps = []
+    emit_lock = threading.Lock()
 
     def emit(rec):
+        with emit_lock:
+            _emit(rec)
+
+    def _emit(rec):
         nonlocal done_count
         done_count += 1
         progress(done_count, len(files), rec["file"])
@@ -424,41 +432,43 @@ def run(
         else:
             pending_skips = [job for job in jobs if job["skip"]]
 
-        pos = 0
-        while pos < len(todo):
-            if stop_event is not None and stop_event.is_set():
-                summary["stopped"] = True
-                stopped_job = todo[pos]
-                stopped_job["rec"]["status"] = "STOPPED"
-                stopped_job["rec"]["error"] = "已停止"
-                emit(stopped_job["rec"])
-                break
-            chunk = todo[pos:]
+        def _on_start(job):
+            progress(min(len(files), done_count + 1), len(files), str(job["src"]))
 
-            def _on_start(job):
-                progress(min(len(files), done_count + 1), len(files), str(job["src"]))
-
-            consumed, stopped, fail_msg, stdout = _run_launch(
-                chunk, accore, lisp_path, timeout, stop_event, _on_start, logs
-            )
-            ready = fontfix.parse_fontfix_output(stdout).get("ready", False)
-            for offset in range(consumed):
-                emit(_finish_job(chunk[offset], ready))
-            pos += consumed
-            if stopped:
-                summary["stopped"] = True
-                if pos < len(todo):
-                    stopped_job = todo[pos]
+        def _run_group(group):
+            pos = 0
+            while pos < len(group):
+                if stop_event is not None and stop_event.is_set():
+                    summary["stopped"] = True
+                    stopped_job = group[pos]
                     stopped_job["rec"]["status"] = "STOPPED"
                     stopped_job["rec"]["error"] = "已停止"
                     emit(stopped_job["rec"])
-                break
-            if consumed < len(chunk) and fail_msg:
-                bad = chunk[consumed]
-                bad["rec"]["status"] = "FAILED"
-                bad["rec"]["error"] = fail_msg
-                emit(bad["rec"])
-                pos += 1
+                    return
+                chunk = group[pos:]
+                consumed, stopped, fail_msg, stdout = _run_launch(
+                    chunk, accore, lisp_path, timeout, stop_event, _on_start, logs
+                )
+                ready = fontfix.parse_fontfix_output(stdout).get("ready", False)
+                for offset in range(consumed):
+                    emit(_finish_job(chunk[offset], ready))
+                pos += consumed
+                if stopped:
+                    summary["stopped"] = True
+                    if pos < len(group):
+                        stopped_job = group[pos]
+                        stopped_job["rec"]["status"] = "STOPPED"
+                        stopped_job["rec"]["error"] = "已停止"
+                        emit(stopped_job["rec"])
+                    return
+                if consumed < len(chunk) and fail_msg:
+                    bad = chunk[consumed]
+                    bad["rec"]["status"] = "FAILED"
+                    bad["rec"]["error"] = fail_msg
+                    emit(bad["rec"])
+                    pos += 1
+
+        parallel.run_groups(parallel.split(todo, workers), _run_group)
         if not summary["stopped"]:
             for job in pending_skips:
                 emit(job["rec"])
