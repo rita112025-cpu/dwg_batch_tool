@@ -7,3 +7,4 @@ environment_check.txt
 ErrorReports/
 baseline_results.txt
 .pytest_tmp/
+.coverage
