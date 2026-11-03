@@ -56,6 +56,12 @@ tkinter 介面：選輸入/輸出資料夾、勾選處理選項、編輯關鍵�
 GUI log 寫入 `output\logs\gui.log`。掃描不會執行 AutoCAD、不修改任何檔案。
 「產生 CSV」控制 analyze 的 CSV；`scada_hits.csv` 只要勾選「SCADA 關鍵字搜尋」就會產生。
 
+### 同時處理數（並行）
+「① 基本設定」的「同時處理數」決定同時開幾個 `accoreconsole`（1–8，預設為 CPU 邏輯核心數的一半、最多 4；寫進 `config.json` 的 `workers`）。DWG 轉 DXF、缺字體修復、文字擷取／取代、自動分圖層都會把檔案輪流分給這幾個程序同時處理；每個程序內仍是一次開多張圖，啟動成本只付一次。
+- 結果 CSV／JSONL 仍是一檔一列；DWG 轉 DXF 與缺字體修復是做完一張寫一列，所以列的順序可能和檔案順序不同。
+- 「停止」會同時中止所有程序。
+- 數字越大越快，但每個 `accoreconsole` 都會吃記憶體；大圖建議 2–3。
+
 ### DWG / DWT 版本表（免 AutoCAD、免管理員）
 來源區的「產生 DWG/DWT 版本表」會直接唯讀檔案前 6 bytes 的 `ACxxxx` header，輸出 `output/csv/dwg_versions.csv`。
 - 支援 `.dwg` 與 `.dwt`；DWT 使用相同的 DWG header 判讀方式。
@@ -137,6 +143,24 @@ MTEXT 會把新的純文字嵌回原本的格式碼，所以沒改到的字仍�
 4. 取消預覽再跑一次。輸出 DWG 用 AutoCAD 打開，被改的 MTEXT 仍保留字高；沒有符合的檔不會出現在輸出，除非有勾複製。
 5. 讓其中一個 DWG 維持在 AutoCAD 開啟，再跑一次，原始檔仍不被存回。
 
+### 圖框屬性（標題欄批次讀寫）
+「② 我要做什麼？」選擇「圖框屬性」。「圖框 Block 名稱」填一個或多個名稱，以逗號分隔，可用 `*` 與 `?`（例如 `TITLE*, 圖框*`），不分大小寫；動態圖塊以有效名稱比對。
+
+1. **匯出圖框屬性**：掃描輸入資料夾的 DWG，把每個符合的圖框插入寫成輸出資料夾裡的 `titleblock_attrs.csv`。每個圖框一列，欄位為 `file`（相對於輸入資料夾）、`layout`、`block_name`、`handle`，之後每個屬性 tag 一欄；同一圖框重複的 tag 會變成 `TAG#2`。不輸出 DWG、不修改原圖。
+2. 用 Excel 編輯 CSV 的屬性值後存檔（UTF-8 或 Excel 預設的 Big5 CSV 都可讀）。前四欄不要改。
+3. **寫回圖框屬性**：「寫回用 CSV」選剛剛編輯的檔（匯出後會自動帶入）。每個 DWG 先複製到暫存檔、重新讀一次目前的屬性，只把和 CSV 不同的值用 accoreconsole + LISP 寫回，`QSAVE` 後搬到輸出資料夾（保留子資料夾結構）。原始 DWG 不會被改寫。CSV 沒有列到的 DWG 不處理。
+   - 「寫回時只預覽變更，不輸出 DWG」是 dry-run，狀態為「預覽」。
+   - 已存在的輸出 DWG 會略過，除非勾選覆寫。
+
+結果：
+- `logs\titleblock_results.csv` / `.jsonl`：每筆變更的檔案、輸出、版面、圖框、handle、tag、原值、新值、狀態（已寫入／預覽／無變更／略過／失敗／已停止）與錯誤。
+- `logs\titleblock_read_results.csv`、`titleblock_read.log`、`titleblock.log`，以及各階段的 `titleblock_*_batch_*.stdout.log`。
+
+注意：
+- Excel 會把 `001` 變成 `1`、`1.50` 變成 `1.5`。這類「數值相同、字串不同」的變更會標成「略過」不寫入；需要保留前導零時請用 Excel「資料 → 從文字/CSV」把欄位設成文字。像 `1E5` 這種會被當成科學記號的 handle，匯出時寫成 `="1E5"` 保護。
+- 多行屬性（MTEXT 屬性）只匯出第一段文字，不支援寫回（標成「略過」）。
+- CSV 填了圖框沒有的 tag、或 handle 在圖面裡找不到，該筆標成「失敗」，同一檔其他變更照常寫回。
+
 ### 自動分圖層
 「② 我要做什麼？」選擇「自動分圖層」。圖檔常常整張都在圖層 0。這個模式依物件類型把實體搬到對應圖層，使用和缺字體修復相同的 accoreconsole 批次、輸出資料夾、`logs\`、`|=|` 結果列與暫存複本。原始圖檔不會被改寫；正在 AutoCAD 裡開啟的圖只要還能讀取，也會用複本處理。
 
@@ -177,6 +201,34 @@ MTEXT 會把新的純文字嵌回原本的格式碼，所以沒改到的字仍�
 3. 取消預覽再跑。原始檔時間不變。輸出 DWG 裡聚合線在 `PL`、文字在 `TST`、填充在 `H`、圖塊在以圖塊名稱命名的圖層。新圖層顏色為 1–9，舊圖層顏色沒變。
 4. 取消「保持原外觀」再輸出到另一個資料夾，BYLAYER 的線應跟著新圖層變色；勾著時外觀應接近原圖。
 5. 放一個鎖住的圖層，沒勾解鎖時該層物件留在原地，結果列出略過的圖層；勾選後物件會搬走，圖層仍是鎖定。
+
+### 差異比對
+比對兩版圖面，列出哪裡改了。原始圖檔不會被修改。
+- 輸入：舊版、新版各選一個檔案，或各選一個資料夾。資料夾依相對路徑配對，副檔名不計（`舊\A\x.dwg` 對 `新\A\x.dxf`）。只在一邊出現的檔案列為 `ONLY_IN_OLD` / `ONLY_IN_NEW`。
+- DWG 先用 accoreconsole 轉成 DXF（存在 `輸出\dwgdiff\dxf\`），DXF 直接讀。只比 DXF 時不需要 AutoCAD。
+- 比對內容：圖層（新增／刪除／顏色、線型、線寬、開關、凍結、鎖定、出圖）、圖塊插入與屬性值、TEXT／MTEXT 內容、標註的量測值與覆寫文字、一般物件的新增／刪除／移動。
+- 物件配對：先用 handle，handle 對不上時用「類型＋圖層＋配置＋幾何指紋」，再用「座標差都在容差內」。座標容差預設 `0.001`。取消「優先以 handle 配對」就只用幾何配對。
+- 輸出（`輸出\dwgdiff\`）：`diff_summary.csv`（每組檔案一列：狀態、新增／刪除／修改數、各類別數量）、`diff_details.csv`（每筆變更：file、category、change_type=ADDED/REMOVED/MODIFIED、layer、handle、field、before、after、position）、`diff_report.json`（同樣內容加比對參數）。
+
+命令列：
+```
+.venv\Scripts\python scripts\dwgdiff.py <舊版> <新版> <輸出資料夾> [--accore <accoreconsole.exe>] [--tolerance 0.001] [--no-handles]
+```
+
+### 圖層標準檢查
+「② 我要做什麼？」選擇「圖層標準檢查」，指定圖層標準檔（預設為 `samples\layer_standard.csv`，另有 JSON 範例 `samples\layer_standard.json`）。DXF 直接用 ezdxf 讀取，不需要 AutoCAD；DWG 先用 accoreconsole 轉成 `layer_check\dxf\`。原始圖檔不會被改寫。後端是 `scripts\layerstd.py`。
+
+標準檔每列一條，`kind` 欄位決定類型：
+- `exact` / `wildcard` / `regex`：圖層規則，比對圖層名稱（不分大小寫，第一條符合的規則生效）。`color`（ACI，可寫 `1|7` 或 `1-9`）、`linetype`、`lineweight`（`0.25`、`25` 或 `default`）、`plot`（yes/no）空白表示不限；`required=yes` 表示必須至少有一個圖層符合。
+- `forbidden`：符合 `pattern`（萬用字元）的圖層不得存在。
+- `setting`：全域設定，`pattern` 為名稱、`value` 為值：`name_regex`（命名規則，區分大小寫）、`unlisted_layers`、`layer0_entities`、`empty_layers`（皆為 `error` / `warning` / `off`）。
+
+違規類型：`NAME_NONSTANDARD`、`COLOR_MISMATCH`、`LINETYPE_MISMATCH`、`LINEWEIGHT_MISMATCH`、`PLOT_MISMATCH`、`ENTITIES_ON_LAYER_0`（只算模型／配置空間，圖塊定義內的圖元不算）、`EMPTY_LAYER`、`MISSING_REQUIRED_LAYER`、`LAYER_FORBIDDEN`。圖層 `0` 與 `Defpoints` 不做命名與空圖層檢查。
+
+輸出在輸出資料夾的 `layer_check\`：
+- `layer_check_details.csv`：每筆違規一列（file、layer、rule、severity、expected、actual）。
+- `layer_check_summary.csv`：每檔一列，含錯誤／警告數與合規率（沒有錯誤級違規的圖層數 ÷（圖層數＋缺少的必要圖層數））。
+- `layer_check_report.html`：單檔 HTML 報告，內嵌 CSS，可直接寄給別人開啟。
 
 ### 桌面捷徑
 雙擊 `create_shortcut.bat` 會在桌面建立「DWG分析」捷徑（圖示為 `dwg_analysis.ico`）。

@@ -35,6 +35,7 @@ Allowed (controlled, bounded, reversible):
 - Cable Tray Designer bridge feasibility testing (no formal integration)
 - Regression tests / validation tooling
 - Bug fixes and evidence-quality improvements
+- DWG batch-tool upgrade (2026-10, user-approved): DWG revision diff, title-block attribute batch read/write, layer standard check report, parallel accoreconsole execution (`workers`), test coverage work
 
 Still frozen:
 
@@ -42,7 +43,7 @@ Still frozen:
 - Ollama
 - Dify
 - Open WebUI integration
-- New unrelated parsers
+- New unrelated parsers (other than the DWG batch-tool features listed above)
 - Production automation
 
 Previously developed retrieval modules remain unintegrated. Test success does not authorize lifting the remaining freeze or changing approval status.

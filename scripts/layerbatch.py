@@ -21,6 +21,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import fontfix  # noqa: E402
 import layerclass  # noqa: E402
+import parallel  # noqa: E402
 from common import decode_console, log_error  # noqa: E402
 from convert_batch import DONE_RE, OPEN_RE, _Reader, _decode, _has_blocking_messagebox  # noqa: E402
 from convert_single import _terminate, publish_dxf, safe_tmpdir, sha256  # noqa: E402
@@ -143,7 +144,17 @@ def _run_launch(jobs, accore, lisp_path, script_text, timeout, stop_event, on_fi
             _terminate(proc)
 
 
-def _launch_all(jobs, accore, lisp_path, script_text_of, timeout, stop_event, logs, on_file_start):
+def _launch_all(jobs, accore, lisp_path, script_text_of, timeout, stop_event, logs, on_file_start,
+                workers=1):
+    """Run ``jobs``, restarting after a stalled file. Returns True when stopped.
+
+    ``workers`` > 1 splits the jobs over that many accoreconsole processes.
+    """
+    groups = parallel.split(jobs, workers)
+    if len(groups) > 1:
+        return any(parallel.run_groups(groups, lambda group: _launch_all(
+            group, accore, lisp_path, script_text_of, timeout, stop_event, logs, on_file_start,
+        )))
     pos = 0
     stopped = False
     while pos < len(jobs):
@@ -336,6 +347,7 @@ def run(
     recursive=True,
     overwrite=False,
     timeout=300,
+    workers=1,
     stop_event=None,
     progress=None,
     log=None,
@@ -450,6 +462,7 @@ def run(
                 lambda chunk: layerclass.build_script(chunk, lisp_path, dry_run),
                 timeout, stop_event, logs,
                 lambda job: progress(min(summary["dwg"], done + 1), summary["dwg"], str(job["src"])),
+                workers=workers,
             )
             ready = any("LAYERCLASS_READY" in (job.get("stdout_ready") or "") for job in todo)
             for job in todo:
