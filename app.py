@@ -11,6 +11,8 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, scrolledtext, ttk
 
 ROOT = Path(__file__).resolve().parent
+# ezdxf's compiled .pyd accelerators are unsigned and Windows App Control blocks them; use pure Python.
+os.environ.setdefault("EZDXF_DISABLE_C_EXT", "1")
 sys.path.insert(0, str(ROOT / "scripts"))
 import common  # noqa: E402
 import env_check  # noqa: E402
