@@ -7,3 +7,8 @@ environment_check.txt
 ErrorReports/
 baseline_results.txt
 .pytest_tmp/
+# local-only files (backup cleanup 2026-11-05)
+.pytest_tmp*/
+artifacts/
+*.bak_*
+shiba_gentleman_cafe*.png
