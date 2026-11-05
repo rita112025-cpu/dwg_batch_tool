@@ -64,6 +64,15 @@ GUI log 寫入 `output\logs\gui.log`。掃描不會執行 AutoCAD、不修改任
 - `format` 直接以「`ACxxxx`→西元年」顯示，一眼看懂版本與年份；例如 `AC1032` 顯示為 `AC1032→2018`。
 - 未知的新 `ACxxxx` 代碼會保留原碼並標記 `UNKNOWN_CODE`，不會猜測版本。
 
+### Revit 代理圖形（PROXYGRAPHICS=1）
+
+「② 我要做什麼？」選擇「Revit 代理圖形」。工具會把每個 DWG 複製到暫存檔，透過 `accoreconsole` 設定 `PROXYGRAPHICS=1`、讀回確認後 `QSAVE`，再把完成檔寫入輸出資料夾。
+
+- 原始 DWG 不會被修改，也不會執行 `EXPLODE`；Cable Tray 等 MEP 物件仍保留為原物件。
+- 可包含子資料夾；輸出會保留相同的相對路徑。既有輸出預設略過，可勾選覆寫。
+- 結果寫入 `logs/proxygraphics_results.csv`、`.jsonl` 與 `proxygraphics.log`。
+- 這個設定只讓 DWG 儲存代理外觀；如果來源圖已經被炸開或已沒有 Cable Tray 物件，無法用此功能還原。
+
 ### 缺字體修復
 「② 我要做什麼？」選擇「缺字體修復」。使用上方的輸入／輸出資料夾（兩者不可相同，輸出也不可放在輸入裡面），按「開始修復字體」。
 每個 DWG 與 DWT（大小寫不分，`.DWT` 也算）會先整檔複製到暫存檔再交給 `accoreconsole` 開啟，所以原始圖不會被改寫；正在 AutoCAD 裡開啟的圖只要還能讀取，也會用複本處理。勾選「包含子資料夾」時，輸出保留相同的資料夾結構。樣板的輸出副檔名維持 `.dwt` / `.DWT`，不會改存成 `.dwg`。暫存檔一律用 `.dwg`：AutoCAD 對 `.dwt` 執行 OPEN 會從樣板另開新圖，而不是編輯該檔。
@@ -71,7 +80,7 @@ GUI log 寫入 `output\logs\gui.log`。掃描不會執行 AutoCAD、不修改任
 替換規則與已在 AutoCAD 2027 驗證過的 FONTFIX 原型相同：
 - 逐一讀取文字樣式的主字體（DXF group 3）與大字體（DXF group 4）。
 - 字體算「找不到」必須同時失敗：AutoCAD 支援路徑（`findfile`）、`%WINDIR%\Fonts`、`%LOCALAPPDATA%\Microsoft\Windows\Fonts`，以及（`.ttf/.ttc/.otf`）登錄的 TrueType 字型名稱。AutoCAD 會把已安裝字型記成 `Microsoft JhengHei.ttf`，實際檔案卻是 `msjh.ttc`，所以不能只比檔名。
-- 沒有副檔名（例如 `txt`、`genie`）當成 `.shx`。`@` 開頭的直排字體略過。
+- 沒有副檔名（例如 `txt`、`genie`、`@chinaset`）當成 `.shx`。`@` 開頭的 TrueType 直排字體略過；`@` 開頭的 SHX 仍會查檔，缺少時照常替換。
 - 找不到的主字體改成預設主字體（預設 `romans.shx`），找不到的大字體改成預設大字體（預設 `chineset.shx`）。「字體對照」可寫 `舊字體=新字體`，每行一筆，大小寫不分。已安裝的字體不動。
 - 存檔前再檢查一次，仍然找不到的樣式寫進結果。
 
@@ -91,7 +100,7 @@ GUI log 寫入 `output\logs\gui.log`。掃描不會執行 AutoCAD、不修改任
 1. 選「缺字體修復」，輸入資料夾放含缺字 SHX 的 DWG，並放至少一個 `.dwt` 與一個 `.DWT`。輸出選另一個資料夾。可讓其中一個檔案維持在 AutoCAD 開啟。
 2. 維持預設 `romans.shx`／`chineset.shx`，可加一筆對照（例如 `sino2.shx=txt.shx`），勾選子資料夾後開始。
 3. 進度會逐檔前進。原始檔時間與內容不變，被開啟的那張圖也沒被存回。
-4. 輸出的 DWG 在 AutoCAD 2027（zh-TW）打開時，被替換的樣式不再跳缺字；`Microsoft JhengHei.ttf`、`arial.ttf`、`txt` 與 `@` 開頭的樣式維持原樣。輸出的樣板檔名仍是 `.dwt` / `.DWT`（不會多出同名 `.dwg`），開啟後仍可當樣板，樣式替換與 DWG 相同。
+4. 輸出的 DWG 在 AutoCAD 2027（zh-TW）打開時，被替換的樣式不再跳缺字；`Microsoft JhengHei.ttf`、`arial.ttf`、`txt` 與已安裝的 `@` 開頭字型維持原樣。輸出的樣板檔名仍是 `.dwt` / `.DWT`（不會多出同名 `.dwg`），開啟後仍可當樣板，樣式替換與 DWG 相同。
 5. `logs\fontfix_results.csv` 與 `fontfix.log` 有舊字體 → 新字體，以及存檔後仍缺字的樣式。
 6. 「另存版本」選 AutoCAD 2013，再用「DWG / DWT 版本表」確認該 DWG 與該 DWT 都是 `AC1027→2013`，且 DWT 輸出副檔名沒有變成 `.dwg`。
 7. 處理中按「停止」，批次會在目前檔案後停下，已完成的輸出保留。

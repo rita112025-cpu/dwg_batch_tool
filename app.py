@@ -18,6 +18,7 @@ import pipeline  # noqa: E402
 import dwg_version  # noqa: E402
 import fontfix  # noqa: E402
 import fontfix_batch  # noqa: E402
+import proxybatch  # noqa: E402
 import dwgtext  # noqa: E402
 import textbatch  # noqa: E402
 import layerclass  # noqa: E402
@@ -55,6 +56,7 @@ LOG_FG = {"success": "#1B6E2C", "warning": "#8A5A00", "failed": "#B3261E"}      
 PRIMARY_RESULTS = {
     "version": ("csv/dwg_versions.csv",),
     "fontfix": ("logs/fontfix_results.csv",),
+    "proxygraphics": ("logs/proxygraphics_results.csv",),
     "textextract": ("logs/textextract_hits.csv",),
     "textreplace": ("logs/textreplace_changes.csv",),
     "layerclass": ("logs/layerclass_moves.csv",),
@@ -242,6 +244,7 @@ class App:
         radio_row.pack(fill="x", padx=6, pady=6)
         self.mode_buttons = []
         modes = (("scan", "掃描資料夾"), ("version", "DWG / DWT 版本表"), ("fontfix", "缺字體修復"),
+                 ("proxygraphics", "Revit 代理圖形"),
                  ("layerclass", "自動分圖層"),
                  ("textextract", "文字擷取"), ("textreplace", "文字取代"),
                  ("dwg", "DWG 轉 DXF + 解析"), ("analysis", "工程資料分析"))
@@ -358,6 +361,32 @@ class App:
         self.ff_map_text.bind("<Shift-Tab>", lambda e: (e.widget.tk_focusPrev().focus_set(), "break")[1])
         self.btn_fontfix = ttk.Button(fontfix_box, text="開始修復字體", command=self._start_fontfix)
         self.btn_fontfix.pack(anchor="w", pady=(4, 0))
+
+        proxy_box = ttk.Frame(self.mode_frame)
+        self.mode_frames["proxygraphics"] = proxy_box
+        ttk.Label(
+            proxy_box,
+            text="Revit 代理圖形（PROXYGRAPHICS=1）",
+            font=(tkfont.nametofont("TkDefaultFont").actual("family"), 11),
+        ).pack(anchor="w")
+        ttk.Label(
+            proxy_box,
+            text=("每個 DWG 都先複製到暫存檔，再以 AutoCAD 設定 PROXYGRAPHICS=1 並存檔。\n"
+                  "完成檔寫入輸出資料夾，原始 DWG 不會被修改；不會 EXPLODE 物件。"),
+            justify="left",
+            wraplength=760,
+        ).pack(anchor="w", pady=(2, 6))
+        ttk.Checkbutton(
+            proxy_box, text="包含子資料夾", variable=self.opts["recursive"]
+        ).pack(anchor="w")
+        self.v_pg_overwrite = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            proxy_box, text="覆寫既有的輸出 DWG", variable=self.v_pg_overwrite
+        ).pack(anchor="w")
+        self.btn_proxygraphics = ttk.Button(
+            proxy_box, text="開始設定代理圖形", command=self._start_proxygraphics
+        )
+        self.btn_proxygraphics.pack(anchor="w", pady=(8, 0))
 
         extract = ttk.Frame(self.mode_frame)
         self.mode_frames["textextract"] = extract
@@ -668,11 +697,13 @@ class App:
         state = "disabled" if busy else "normal"
         for widget in (self.mode_buttons + self.browse_buttons +
                        [self.btn_scan, self.btn_versions, self.btn_analysis, self.btn_fontfix,
+                        self.btn_proxygraphics,
                         self.btn_extract, self.btn_replace, self.btn_layer,
                         self.btn_files, self.btn_folder, self.btn_recheck, self.btn_save_config]):
             widget.configure(state=state)
         self.btn_start.configure(state="normal" if not busy and self.env_ok else "disabled")
         self.btn_fontfix.configure(state="normal" if not busy and self.env_ok else "disabled")
+        self.btn_proxygraphics.configure(state="normal" if not busy and self.env_ok else "disabled")
         self.btn_extract.configure(state="normal" if not busy and self.env_ok else "disabled")
         self.btn_replace.configure(state="normal" if not busy and self.env_ok else "disabled")
         self.btn_layer.configure(state="normal" if not busy and self.env_ok else "disabled")
@@ -1026,6 +1057,86 @@ class App:
             + (f"\n錯誤：{result['fatal']}" if result.get("fatal") else "")
             + (f"\n\n失敗檔案：\n{shown}" if failed_files else "")
             + (f"\n\n仍缺字：\n{still_shown}" if still else "")
+        )
+        self._set_status(state, verdict)
+        if not result.get("fatal") and not result.get("stopped"):
+            self.v_progress.set(100)
+        self._refresh_analysis_outputs()
+        self._reveal(self.result_frame)
+
+    def _start_proxygraphics(self):
+        if self._busy():
+            return
+        if not self.env_ok:
+            messagebox.showerror(
+                "無法設定代理圖形", "找不到可用的 accoreconsole；請先完成環境設定並重新檢查。"
+            )
+            return
+        src = self.v_in.get().strip()
+        dst = self.v_out.get().strip()
+        problem = fontfix.directory_problem(src, dst)
+        if problem:
+            messagebox.showerror("路徑錯誤", problem)
+            return
+        recursive = self.opts["recursive"].get()
+        overwrite = self.v_pg_overwrite.get()
+        timeout = int(self.cfg.get("timeout_seconds", 300))
+        accore = self.cfg.get("accoreconsole", "")
+        self.stop_event.clear()
+        self._can_stop = True
+        self.summary = None
+        self.v_progress.set(0)
+        self.v_ptext.set("")
+        self.v_current.set("")
+        self.v_result.set("設定代理圖形中...")
+        self._set_status("running", "批次設定 PROXYGRAPHICS=1…")
+
+        def work():
+            try:
+                result = proxybatch.run(
+                    src,
+                    dst,
+                    accore,
+                    recursive=recursive,
+                    overwrite=overwrite,
+                    timeout=timeout,
+                    stop_event=self.stop_event,
+                    progress=lambda i, n, cur: self.q.put(("progress", "Revit 代理圖形", i, n, cur)),
+                    log=lambda level, message: self.q.put(("log", level, message)),
+                )
+            except Exception as exc:  # noqa: BLE001
+                result = dict(
+                    dwg=0, ok=0, failed=0, skipped=0, warnings=0, stopped=False,
+                    fatal=f"{type(exc).__name__}: {exc}", failed_files=[], elapsed=0,
+                )
+                common.log_error({"output_dir": dst}, f"proxygraphics crashed: {result['fatal']}")
+            self.q.put(("proxygraphics_done", result))
+
+        self.worker = threading.Thread(target=work, daemon=True)
+        self.worker.start()
+        self._set_busy_ui(True)
+
+    def _on_proxygraphics_done(self, result):
+        self.summary = result
+        self.worker = None
+        self._can_stop = False
+        self._set_busy_ui(False)
+        if result.get("dwg", 0) == 0 and not result.get("fatal") and not result.get("stopped"):
+            state, verdict = "warning", "沒有找到 DWG"
+        else:
+            state, verdict = classify_outcome(result)
+        failed_files = result.get("failed_files", [])
+        shown = "\n".join(f"  - {friendly_failure(item)}" for item in failed_files[:8])
+        if len(failed_files) > 8:
+            shown += f"\n  ... 另有 {len(failed_files) - 8} 個（見 errors.log）"
+        st = STATE[state]
+        self.v_result.set(
+            f"{st['symbol']} {st['label']}：{verdict}\n"
+            f"DWG：{result.get('dwg', 0)}　成功：{result.get('ok', 0)}　"
+            f"失敗：{result.get('failed', 0)}　略過：{result.get('skipped', 0)}\n"
+            "結果：logs/proxygraphics_results.csv"
+            + (f"\n錯誤：{result['fatal']}" if result.get("fatal") else "")
+            + (f"\n\n失敗檔案：\n{shown}" if failed_files else "")
         )
         self._set_status(state, verdict)
         if not result.get("fatal") and not result.get("stopped"):
@@ -1398,6 +1509,8 @@ class App:
                     self._analysis_done(m[1])
                 elif k == "fontfix_done":
                     self._on_fontfix_done(m[1])
+                elif k == "proxygraphics_done":
+                    self._on_proxygraphics_done(m[1])
                 elif k == "extract_done":
                     self._on_extract_done(m[1])
                 elif k == "replace_done":

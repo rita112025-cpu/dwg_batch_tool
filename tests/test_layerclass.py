@@ -113,6 +113,23 @@ def _run(src, dst, **kwargs):
     return layerbatch.run(src, dst, FAKE, timeout=30, **kwargs)
 
 
+def test_batch_hashes_the_source_once(tmp_path, monkeypatch):
+    src = tmp_path / "in"
+    drawing = src / "a.dwg"
+    _dwg(drawing)
+    calls = []
+    real = layerbatch.sha256
+
+    def spy(path, *args, **kwargs):
+        calls.append(str(path))
+        return real(path, *args, **kwargs)
+
+    monkeypatch.setattr(layerbatch, "sha256", spy)
+    summary = _run(src, tmp_path / "out", recursive=False)
+    assert summary["ok"] == 1
+    assert calls.count(str(drawing)) == 1
+
+
 def test_batch_copies_chinese_paths_and_leaves_the_source(tmp_path):
     src = tmp_path / "輸入 資料"
     drawing = src / "配置" / "圖面 01.dwg"

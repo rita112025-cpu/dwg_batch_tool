@@ -81,6 +81,8 @@ def test_extension_at_prefix_and_support_path():
     assert fontfix.is_missing("genie.shx", support)
     assert fontfix.is_missing("sino2.shx", support)
     assert not fontfix.is_missing("@PMingLiU.ttf", _ctx())  # vertical face is skipped
+    assert fontfix.is_missing("@chinaset", support)         # missing vertical SHX is repaired
+    assert not fontfix.is_missing("@chinaset", _ctx(support_files=["@chinaset.shx"]))
     assert not fontfix.is_missing("", support)
     assert not fontfix.is_missing(None, support)
 
@@ -197,6 +199,7 @@ def test_generated_lisp_is_utf8_and_does_not_use_or_as_a_value():
     assert "(findfile probe)" in src
     assert "(entmod ned)" in src
     assert "(substr fn 1 1)" in src
+    assert '(ff-ttf-p (ff-probe fn))' in src
     assert '".TTF"' in src and '".TTC"' in src and '".OTF"' in src
     raw = fontfix.lisp_bytes(src)
     assert raw.startswith(b"\xef\xbb\xbf")
@@ -224,6 +227,22 @@ def test_generated_lisp_is_utf8_and_does_not_use_or_as_a_value():
     fontfix.script_bytes(script)
 
 
+def test_script_qsaves_only_after_a_style_change():
+    script = fontfix.build_script(
+        [{"spath": "C:/temp/in_abc.dwg"}], "C:/temp/fontfix_run.lsp"
+    )
+    assert "(> *ff-changed* 0)" in script
+    assert '(command "_.QSAVE")' in script
+    assert "\n_.QSAVE\n" not in script
+    assert '(command "_.CLOSE" "N")' in script
+    versioned = fontfix.build_script(
+        [{"spath": "C:/temp/in_abc.dwg", "save_version": "2013", "save_path": "C:/temp/out_abc.dwg"}],
+        "C:/temp/fontfix_run.lsp",
+    )
+    assert "_.SAVEAS" in versioned
+    assert '(command "_.QSAVE")' not in versioned
+
+
 def _rows(parsed):
     return [
         (row["style"], row["old_primary"], row["new_primary"], row["old_big"], row["new_big"])
@@ -249,6 +268,22 @@ def test_parse_markers():
     assert parsed["still_missing"][0]["style"] == "Weird"
     assert "ACSE | sino2.shx -> romans.shx" in fontfix.replacement_text(parsed["replacements"])
     assert "主=missing.shx" in fontfix.still_text(parsed["still_missing"])
+
+
+def test_parse_reports_shape_files_apart_from_missing_fonts():
+    sep = fontfix.MARKER_SEP
+    text = (
+        f"FONTFIX_STILL{sep}Weird{sep}missing.shx{sep}\n"
+        f"FONTFIX_SHAPE{sep}missing_shape_file.shx{sep}AB12{sep}\n"
+        f"FONTFIX_SUMMARY{sep}0{sep}1\n"
+    )
+    parsed = fontfix.parse_fontfix_output(text)
+    assert parsed["still_missing"][0]["style"] == "Weird"
+    assert parsed["shape_gaps"] == [
+        {"file": "missing_shape_file.shx", "handle": "AB12", "name": ""}
+    ]
+    assert "missing_shape_file.shx" in fontfix.shape_text(parsed["shape_gaps"])
+    assert "形狀檔未處理" in fontfix.shape_text(parsed["shape_gaps"])
 
 
 def test_parse_pipe_separator_keeps_spaces_and_empty_fields():
@@ -436,6 +471,70 @@ def test_batch_copies_chinese_paths_and_leaves_the_source_alone(tmp_path):
     ]
     assert payload[0]["replacement_rows"][0]["new_primary"] == "romans.shx"
     assert seen and seen[-1][0] == 2 and seen[-1][1] == 2
+
+
+def test_unchanged_drawing_is_published_as_the_original_bytes(tmp_path):
+    src = tmp_path / "in"
+    drawing = src / "clean.dwg"
+    _dwg(drawing, extra=b"FONTFIX_TEST_CLEAN")
+    original = drawing.read_bytes()
+    dst = tmp_path / "out"
+    summary = _run(src, dst, recursive=False)
+    assert summary["fatal"] == ""
+    assert (summary["ok"], summary["failed"], summary["warnings"]) == (1, 0, 0)
+    assert summary["styles_replaced"] == 0
+    assert (dst / "clean.dwg").read_bytes() == original
+
+
+def test_shape_gaps_do_not_raise_a_missing_font_warning(tmp_path):
+    src = tmp_path / "in"
+    drawing = src / "shapes.dwg"
+    _dwg(drawing, extra=b"FONTFIX_TEST_SHAPE")
+    original = drawing.read_bytes()
+    dst = tmp_path / "out"
+    summary = _run(src, dst, recursive=False)
+    assert summary["fatal"] == ""
+    assert (summary["ok"], summary["warnings"]) == (1, 0)
+    result = summary["results"][0]
+    assert result["still_missing"] == ""
+    assert "missing_shape_file.shx" in result["shape_gaps"]
+    assert "形狀檔未處理" in result["shape_gaps"]
+    assert (dst / "shapes.dwg").read_bytes() == original
+    log = (dst / "logs" / "fontfix.log").read_text(encoding="utf-8")
+    assert "形狀檔未處理" in log
+    assert "仍缺字" not in log
+    with (dst / "logs" / "fontfix_results.csv").open(encoding="utf-8-sig", newline="") as fh:
+        row = next(csv.DictReader(fh))
+    assert row["仍缺字"] == ""
+    assert "missing_shape_file.shx" in row["形狀檔未處理"]
+
+
+def test_copy_hashed_matches_the_source_digest(tmp_path):
+    from convert_single import copy_hashed
+
+    src = tmp_path / "a.dwg"
+    _dwg(src, extra=b"payload")
+    dest = tmp_path / "nested" / "b.dwg"
+    digest = copy_hashed(src, dest)
+    assert digest == _sha(src)
+    assert dest.read_bytes() == src.read_bytes()
+
+
+def test_batch_hashes_the_source_once(tmp_path, monkeypatch):
+    src = tmp_path / "in"
+    drawing = src / "a.dwg"
+    _dwg(drawing)
+    calls = []
+    real = fontfix_batch.sha256
+
+    def spy(path, *args, **kwargs):
+        calls.append(str(path))
+        return real(path, *args, **kwargs)
+
+    monkeypatch.setattr(fontfix_batch, "sha256", spy)
+    summary = _run(src, tmp_path / "out", recursive=False)
+    assert summary["ok"] == 1
+    assert calls.count(str(drawing)) == 1
 
 
 def test_dwt_is_repaired_as_dwt_and_source_is_untouched(tmp_path, monkeypatch):
@@ -715,6 +814,35 @@ def _scripted_accore(accore, lines, folder):
 
 
 @pytest.mark.accore
+def test_accoreconsole_publishes_an_unchanged_drawing_byte_for_byte(tmp_path):
+    """No missing text style means no QSAVE, so the output bytes stay the source."""
+    ezdxf = pytest.importorskip("ezdxf")
+    from convert_single import safe_tmpdir
+
+    accore = load_config()["accoreconsole"]
+    work = safe_tmpdir(tmp_path / "logs")
+    doc = ezdxf.new()
+    doc.styles.get("Standard").dxf.font = "txt.shx"
+    source_dxf = work / "clean.dxf"
+    doc.saveas(source_dxf)
+    src = tmp_path / "in"
+    src.mkdir()
+    source = src / "clean.dwg"
+    _rc, why, console = _scripted_accore(accore, [
+        "FILEDIA", "0", "CMDDIA", "0", "EXPERT", "5", "FONTALT", "txt.shx",
+        "_.OPEN", f'"{source_dxf.as_posix()}"',
+        "_.SAVEAS", "2018", f'"{source.as_posix()}"', "_.QUIT",
+    ], work / "setup")
+    assert not why and source.is_file(), console
+    original = source.read_bytes()
+    dst = tmp_path / "out"
+    summary = fontfix_batch.run(src, dst, accore, recursive=False, timeout=180)
+    assert not summary["fatal"] and summary["ok"] == 1, summary
+    assert summary["styles_replaced"] == 0 and summary["warnings"] == 0, summary
+    assert (dst / "clean.dwg").read_bytes() == original
+
+
+@pytest.mark.accore
 def test_accoreconsole_replaces_missing_fonts_and_keeps_installed_ones(tmp_path):
     ezdxf = pytest.importorskip("ezdxf")
     from convert_single import safe_tmpdir
@@ -775,3 +903,57 @@ def test_accoreconsole_replaces_missing_fonts_and_keeps_installed_ones(tmp_path)
     assert styles["MISSING"][1].lower() == "chineset.shx"
     assert styles["VERT"][0].startswith("@")
     assert "jhenghei" in styles["JHEI"][0].lower()
+
+
+@pytest.mark.accore
+def test_accoreconsole_preserves_shape_records_and_repairs_text(tmp_path):
+    """Missing shape definitions must never be replaced with a text font."""
+    ezdxf = pytest.importorskip("ezdxf")
+    from convert_single import safe_tmpdir
+
+    accore = load_config()["accoreconsole"]
+    work = safe_tmpdir(tmp_path / "logs")
+    doc = ezdxf.new()
+    doc.styles.new("REPAIR_TEXT", dxfattribs={"font": "missing_text_font.shx"})
+    doc.styles.get_shx("missing_shape_file.shx")
+    doc.styles.get_shx("another_missing_shape.shx")
+    doc.styles.get_shx("ltypeshp.shx")
+    source_dxf = work / "shapes.dxf"
+    doc.saveas(source_dxf)
+    src = tmp_path / "in"
+    src.mkdir()
+    source = src / "shapes.dwg"
+    rc, why, console = _scripted_accore(accore, [
+        "FILEDIA", "0", "CMDDIA", "0", "EXPERT", "5", "FONTALT", "txt.shx",
+        "_.OPEN", f'"{source_dxf.as_posix()}"',
+        "_.SAVEAS", "2018", f'"{source.as_posix()}"', "_.QUIT",
+    ], work / "setup")
+    assert not why and source.is_file(), console
+    digest = _sha(source)
+    dst = tmp_path / "out"
+    summary = fontfix_batch.run(src, dst, accore, recursive=False, timeout=180)
+    assert not summary["fatal"] and summary["ok"] == 1, summary
+    assert _sha(source) == digest
+    result = summary["results"][0]
+    assert [row["style"] for row in result["replacement_rows"]] == ["REPAIR_TEXT"]
+    assert result["still_missing"] == ""
+    assert summary["warnings"] == 0
+    assert {row["file"].lower() for row in result["shape_rows"]} == {
+        "missing_shape_file.shx", "another_missing_shape.shx",
+    }
+    assert "形狀檔未處理" in result["shape_gaps"]
+
+    back = work / "shapes_back.dxf"
+    fixed = dst / "shapes.dwg"
+    rc, why, console = _scripted_accore(accore, [
+        "FILEDIA", "0", "CMDDIA", "0", "EXPERT", "5", "FONTALT", "txt.shx",
+        "_.OPEN", f'"{fixed.as_posix()}"',
+        "_.SAVEAS", "DXF", "", f'"{back.as_posix()}"', "_.QUIT",
+    ], work / "verify")
+    assert not why and back.is_file(), console
+    saved = ezdxf.readfile(back)
+    assert saved.styles.get("REPAIR_TEXT").dxf.font.lower() == "romans.shx"
+    for filename in ("missing_shape_file.shx", "another_missing_shape.shx", "ltypeshp.shx"):
+        shape = saved.styles.find_shx(filename)
+        assert shape is not None, filename
+        assert shape.dxf.flags & 1
