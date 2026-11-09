@@ -120,8 +120,8 @@ def test_select_all_and_clear_all_buttons(monkeypatch, tk_root):
     a.btn_select_all.invoke()
     assert a._selected_modes() == [key for key, _label in appmod.TASKS]
     assert all(var.get() for var in a.v_modes.values())
-    assert sum(bool(frame.winfo_manager()) for frame in a.mode_frames.values()) == 9
-    assert a.btn_run_selected["text"] == "開始所選任務（9）"
+    assert sum(bool(frame.winfo_manager()) for frame in a.mode_frames.values()) == len(appmod.TASKS)
+    assert a.btn_run_selected["text"] == f"開始所選任務（{len(appmod.TASKS)}）"
     assert all(label in a.lbl_selection["text"] for _key, label in appmod.TASKS)
     assert str(a.btn_run_selected["state"]) == "normal"
 
@@ -253,7 +253,7 @@ def test_stopping_a_batch_skips_the_tasks_that_did_not_start(monkeypatch, tk_roo
 
 
 
-def test_all_nine_tasks_run_in_one_batch(monkeypatch, tk_root, tmp_path):
+def test_all_tasks_run_in_one_batch(monkeypatch, tk_root, tmp_path):
     """Every task keeps its own validation and result rendering when they share one batch."""
     import app as appmod
     monkeypatch.setattr(appmod.App, "_check_env", lambda self: None)
@@ -320,10 +320,38 @@ def test_all_nine_tasks_run_in_one_batch(monkeypatch, tk_root, tmp_path):
     monkeypatch.setattr(appmod.layerbatch, "run", fake_layer)
     monkeypatch.setattr(appmod.pipeline, "run_pipeline", fake_pipeline)
 
+    def fake_diff(*args, **kwargs):
+        calls.append("diff")
+        return dict(pairs=1, changed=0, identical=1, skipped=0, failed=0, added=0, removed=0,
+                    modified=0, stopped=False, fatal="", failed_files=[], elapsed=0.1)
+
+    def fake_layerstd(*args, **kwargs):
+        calls.append("layerstd")
+        return dict(dwg=1, ok=1, failed=0, skipped=0, warnings=0, violations=0, errors=0,
+                    stopped=False, fatal="", failed_files=[], elapsed=0.1)
+
+    def fake_tb_read(*args, **kwargs):
+        calls.append("tb_read")
+        return dict(dwg=1, ok=1, failed=0, skipped=0, warnings=0, blocks=1, csv="",
+                    stopped=False, fatal="", failed_files=[], elapsed=0.1)
+
+    def fake_tb_write(*args, **kwargs):
+        calls.append("tb_write")
+        return dict(dwg=1, ok=1, failed=0, skipped=0, warnings=0, changes=1, unchanged=0,
+                    stopped=False, fatal="", failed_files=[], elapsed=0.1)
+
+    monkeypatch.setattr(appmod.dwgdiff, "run", fake_diff)
+    monkeypatch.setattr(appmod.layerstd, "run", fake_layerstd)
+    monkeypatch.setattr(appmod.titleblock_batch, "run_read", fake_tb_read)
+    monkeypatch.setattr(appmod.titleblock_batch, "run_write", fake_tb_write)
+    a.v_df_old.set(str(inp))
+    a.v_df_new.set(str(inp))
+    a.v_tb_csv.set(str(tmp_path / "titleblock_attrs.csv"))
+
     for key, _label in appmod.TASKS:
         a.v_modes[key].set(True)
         a._on_mode_toggle(key)
-    assert len(a._selected_modes()) == 9
+    assert len(a._selected_modes()) == len(appmod.TASKS)
     a._start_selected()
     deadline = time.time() + 20
     while a._batch is not None and time.time() < deadline:
@@ -333,7 +361,7 @@ def test_all_nine_tasks_run_in_one_batch(monkeypatch, tk_root, tmp_path):
     assert captured["extract"]["pattern"] == "W12"
     assert captured["replace"]["find"] == "W12" and captured["replace"]["repl"] == "W13"
     text = a.v_result.get()
-    assert "批次完成（9 項任務）" in text
+    assert f"批次完成（{len(appmod.TASKS)} 項任務）" in text
     for _key, label in appmod.TASKS:
         assert label in text
     assert a.v_progress.get() == 100
@@ -594,3 +622,45 @@ def test_gui_banner_progress_and_log_colours(tk_root):
     text = a.log_box.get("1.0", "end")
     assert "⚠ 警告" in text and "✗ 失敗" in text and "✓ 成功" in text
     assert a.log_box.tag_ranges("warning") and a.log_box.tag_ranges("failed") and a.log_box.tag_ranges("success")
+
+
+def test_every_workers_runner_forwards_the_worker_count(monkeypatch, tk_root):
+    """Each runner of a batch that takes workers must pass it on, not only store it in params."""
+    import app as appmod
+    monkeypatch.setattr(appmod.App, "_check_env", lambda self: None)
+    _fresh(tk_root)
+    a = appmod.App(tk_root)
+
+    class Params(dict):
+        def __missing__(self, key):
+            return key
+
+    seen = {}
+    for runner, module, func in (
+        ("_run_fontfix", appmod.fontfix_batch, "run"),
+        ("_run_extract", appmod.textbatch, "run_extract"),
+        ("_run_replace", appmod.textbatch, "run_replace"),
+        ("_run_layerclass", appmod.layerbatch, "run"),
+    ):
+        monkeypatch.setattr(module, func, lambda *args, _name=runner, **kwargs: seen.setdefault(_name, kwargs) and {})
+        getattr(a, runner)(Params(workers=5), lambda *args: None, lambda *args: None)
+        assert seen[runner]["workers"] == 5, runner
+
+
+def test_workers_field_reaches_batches_and_is_clamped(monkeypatch, tk_root, tmp_path):
+    """The ① 同時處理數 value feeds every batch that takes workers; bad input falls back to a safe count."""
+    import app as appmod
+    monkeypatch.setattr(appmod.App, "_check_env", lambda self: None)
+    _fresh(tk_root)
+    a = appmod.App(tk_root)
+    a.env_ok = True
+    inp = tmp_path / "in"
+    inp.mkdir()
+    a.v_in.set(str(inp))
+    a.v_out.set(str(tmp_path / "out"))
+    a.v_tx_pattern.set("W12")
+    for raw, expect in (("3", 3), ("99", appmod.parallel.MAX_WORKERS), ("abc", 1), ("0", 1)):
+        a.v_workers.set(raw)
+        assert a._prepare_extract()["workers"] == expect
+        assert a._workers() == expect
+        assert a._current_cfg()["workers"] == expect

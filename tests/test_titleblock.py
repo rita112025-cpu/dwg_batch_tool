@@ -479,6 +479,88 @@ def test_accept_rejects_wrong_drawing(tmp_path):
 # GUI
 # ---------------------------------------------------------------------------
 
+def _finish_task(app):
+    """Wait for the batch worker, then let the GUI consume its queue (what the Tk poll loop does)."""
+    if app.worker is not None:
+        app.worker.join(timeout=30)
+    app._poll()
+
+
+def test_titleblock_mode_widgets(monkeypatch, tk_root, tmp_path):
+    import app as appmod
+    monkeypatch.setattr(appmod.App, "_check_env", lambda self: None)
+    for child in tk_root.winfo_children():
+        child.destroy()
+    app = appmod.App(tk_root)
+    assert {"圖框屬性匯出", "圖框屬性寫回"} <= {button.cget("text") for button in app.mode_buttons}
+    app.env_ok = True
+    app.v_modes["tb_read"].set(True)
+    app._on_mode_toggle("tb_read")
+    assert app.mode_frames["tb_read"].winfo_manager()
+    assert str(app.btn_tb_read["state"]) == "normal" and str(app.btn_tb_write["state"]) == "normal"
+
+    errors = []
+    monkeypatch.setattr(appmod.messagebox, "showerror", lambda title, msg: errors.append(msg))
+    src = tmp_path / "in"
+    src.mkdir()
+    out = tmp_path / "out"
+    out.mkdir()
+    app.v_in.set(str(src))
+    app.v_out.set(str(src))
+    app._start_tasks(["tb_read"])
+    assert errors and "相同" in errors[-1]
+    app.v_out.set(str(out))
+    app.v_tb_blocks.set(" ")
+    app._start_tasks(["tb_read"])
+    assert "圖框" in errors[-1]
+    app.v_tb_csv.set("")
+    app._start_tasks(["tb_write"])
+    assert "CSV" in errors[-1]
+
+    calls = {}
+
+    def fake(name):
+        def run(*args, **kwargs):
+            kwargs["progress"](1, 1, "a.dwg")
+            kwargs["log"]("OK", "done")
+            calls[name] = kwargs
+            return dict(dwg=1, ok=1, failed=0, skipped=0, warnings=0, blocks=2, changes=3,
+                        unchanged=0, stopped=False, fatal="", failed_files=[], elapsed=0.1,
+                        csv=str(out / "titleblock_attrs.csv"))
+        return run
+
+    monkeypatch.setattr(appmod.titleblock_batch, "run_read", fake("read"))
+    monkeypatch.setattr(appmod.titleblock_batch, "run_write", fake("write"))
+    app.v_tb_blocks.set("TITLE*")
+    app._start_tasks(["tb_read"])
+    _finish_task(app)
+    assert calls["read"]["patterns"] == "TITLE*"
+    assert "圖框數：2" in app.v_result.get()
+    assert app.v_tb_csv.get() == str(out / "titleblock_attrs.csv")
+    app.v_tb_dry.set(True)
+    app._start_tasks(["tb_write"])
+    _finish_task(app)
+    assert calls["write"]["csv_path"] == str(out / "titleblock_attrs.csv")
+    assert calls["write"]["dry_run"] is True
+    assert "變更筆數：3" in app.v_result.get()
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(appmod.titleblock_batch, "run_read", boom)
+    app._start_tasks(["tb_read"])
+    _finish_task(app)
+    assert "boom" in app.v_result.get()
+    monkeypatch.setattr(appmod.titleblock_batch, "run_write", boom)
+    app._start_tasks(["tb_write"])
+    _finish_task(app)
+    assert "boom" in app.v_result.get()
+    app.env_ok = False
+    app._start_tasks(["tb_read"])
+    app._start_tasks(["tb_write"])
+    assert "accoreconsole" in errors[-1]
+
+
 # ---------------------------------------------------------------------------
 # Real AutoCAD
 # ---------------------------------------------------------------------------

@@ -25,6 +25,11 @@ import dwgtext  # noqa: E402
 import textbatch  # noqa: E402
 import layerclass  # noqa: E402
 import layerbatch  # noqa: E402
+import dwgdiff  # noqa: E402
+import layerstd  # noqa: E402
+import parallel  # noqa: E402
+import titleblock  # noqa: E402
+import titleblock_batch  # noqa: E402
 
 try:  # crisp text on high-DPI Windows displays
     import ctypes
@@ -64,6 +69,10 @@ PRIMARY_RESULTS = {
     "layerclass": ("logs/layerclass_moves.csv",),
     "dwg": ("csv/scada_hits.csv", "csv/file_index.csv"),
     "analysis": ("cross_reference/cross_reference.csv", "database/project.db"),
+    "diff": ("dwgdiff/diff_summary.csv",),
+    "layerstd": ("layer_check/" + layerstd.HTML_NAME,),
+    "tb_read": ("titleblock_attrs.csv",),
+    "tb_write": ("logs/titleblock_results.csv",),
 }
 
 
@@ -79,11 +88,17 @@ TASKS = (
     ("textreplace", "文字取代"),
     ("dwg", "DWG 轉 DXF + 解析"),
     ("analysis", "工程資料分析"),
+    ("diff", "差異比對"),
+    ("layerstd", "圖層標準檢查"),
+    ("tb_read", "圖框屬性匯出"),
+    ("tb_write", "圖框屬性寫回"),
 )
 TASK_LABELS = dict(TASKS)
 NUMBERS = "①②③④⑤⑥⑦⑧⑨"
-# Jobs that call accoreconsole; the shared start button stays usable without AutoCAD for the others.
-NEEDS_ACCORE = frozenset({"fontfix", "proxygraphics", "layerclass", "textextract", "textreplace", "dwg"})
+# Jobs that always need accoreconsole; the shared start button stays usable without AutoCAD for the others.
+# diff and layerstd read DXF without AutoCAD and only report DWG files that cannot be converted.
+NEEDS_ACCORE = frozenset({"fontfix", "proxygraphics", "layerclass", "textextract", "textreplace", "dwg",
+                          "tb_read", "tb_write"})
 SEVERITY = {"success": 0, "skipped": 1, "warning": 2, "failed": 3}
 
 
@@ -211,21 +226,27 @@ class App:
             "fontfix": self._prepare_fontfix, "proxygraphics": self._prepare_proxygraphics,
             "layerclass": self._prepare_layerclass, "textextract": self._prepare_extract,
             "textreplace": self._prepare_replace, "dwg": self._prepare_dwg,
-            "analysis": self._prepare_analysis,
+            "analysis": self._prepare_analysis, "diff": self._prepare_diff,
+            "layerstd": self._prepare_layerstd, "tb_read": self._prepare_tb_read,
+            "tb_write": self._prepare_tb_write,
         }
         self._runners = {
             "scan": self._run_scan, "version": self._run_versions,
             "fontfix": self._run_fontfix, "proxygraphics": self._run_proxygraphics,
             "layerclass": self._run_layerclass, "textextract": self._run_extract,
             "textreplace": self._run_replace, "dwg": self._run_dwg,
-            "analysis": self._run_analysis,
+            "analysis": self._run_analysis, "diff": self._run_diff,
+            "layerstd": self._run_layerstd, "tb_read": self._run_tb_read,
+            "tb_write": self._run_tb_write,
         }
         self._renderers = {
             "scan": self._render_scan, "version": self._render_versions,
             "fontfix": self._render_fontfix, "proxygraphics": self._render_proxygraphics,
             "layerclass": self._render_layerclass, "textextract": self._render_extract,
             "textreplace": self._render_replace, "dwg": self._render_dwg,
-            "analysis": self._render_analysis,
+            "analysis": self._render_analysis, "diff": self._render_diff,
+            "layerstd": self._render_layerstd, "tb_read": self._render_tb_read,
+            "tb_write": self._render_tb_write,
         }
 
         self.v_in = tk.StringVar(value=str(common.resolve(self.cfg, "input_dir")))
@@ -233,6 +254,7 @@ class App:
         self.opts = {k: tk.BooleanVar(value=v) for k, v in dict(
             recursive=self.cfg.get("recursive", True), convert=True, analyze=True, scada=True,
             csv=True, json=True, overwrite=self.cfg.get("overwrite", False)).items()}
+        self.v_workers = tk.StringVar(value=str(parallel.clamp_workers(self.cfg.get("workers", 1))))
         self.v_progress = tk.DoubleVar(value=0)
         self.v_ptext = tk.StringVar(value="")
         self.v_current = tk.StringVar(value="")
@@ -299,6 +321,14 @@ class App:
             button.grid(row=r, column=2, padx=4)
             self.browse_buttons.append(button)
         paths.columnconfigure(1, weight=1)
+        workers_row = ttk.Frame(src)
+        workers_row.pack(fill="x", padx=6, pady=(0, 4))
+        ttk.Label(workers_row, text="同時處理數", width=12).pack(side="left")
+        self.workers_spin = ttk.Spinbox(workers_row, from_=1, to=parallel.MAX_WORKERS, width=5,
+                                        textvariable=self.v_workers)
+        self.workers_spin.pack(side="left", padx=4)
+        ttk.Label(workers_row, text="同時開啟的 accoreconsole 數（1–8，預設 1；按「儲存設定」才寫入 config.json）",
+                  justify="left").pack(side="left")
 
         # ---- 2 我要做什麼（可多選） ----
         selector = ttk.LabelFrame(main, text="② 我要做什麼？（可多選）")
@@ -602,6 +632,115 @@ class App:
         self.btn_layer = ttk.Button(layer_box, text="開始分圖層", command=self._start_layerclass)
         self.btn_layer.pack(anchor="w", pady=(6, 0))
 
+        title_font = (tkfont.nametofont("TkDefaultFont").actual("family"), 11)
+        diff_box = ttk.Frame(self.mode_frame)
+        self.mode_frames["diff"] = diff_box
+        ttk.Label(diff_box, text="差異比對", font=title_font).pack(anchor="w")
+        ttk.Label(
+            diff_box,
+            text=("比對兩版圖面：可選兩個檔案，或兩個資料夾（依相對路徑配對，副檔名不計）。\n"
+                  "DWG 會先用 accoreconsole 轉成 DXF；DXF 直接讀取。原始圖檔不會被修改。\n"
+                  "結果寫到輸出資料夾的 dwgdiff\\（diff_summary.csv、diff_details.csv、diff_report.json）。"),
+            justify="left", wraplength=760,
+        ).pack(anchor="w", pady=(2, 6))
+        df_form = ttk.Frame(diff_box)
+        df_form.pack(fill="x")
+        self.v_df_old = tk.StringVar(value="")
+        self.v_df_new = tk.StringVar(value="")
+        self.v_df_tol = tk.StringVar(value="0.001")
+        self.diff_browse_buttons = []
+        for row, (label, var) in enumerate((("舊版（檔案或資料夾）", self.v_df_old),
+                                            ("新版（檔案或資料夾）", self.v_df_new))):
+            ttk.Label(df_form, text=label, width=20).grid(row=row, column=0, sticky="w", pady=2)
+            ttk.Entry(df_form, textvariable=var).grid(row=row, column=1, sticky="ew", pady=2, padx=4)
+            folder_btn = ttk.Button(df_form, text="資料夾", command=lambda v=var: self._browse(v))
+            folder_btn.grid(row=row, column=2, padx=2)
+            file_btn = ttk.Button(df_form, text="檔案", command=lambda v=var: self._browse_drawing(v))
+            file_btn.grid(row=row, column=3, padx=2)
+            self.diff_browse_buttons += [folder_btn, file_btn]
+        ttk.Label(df_form, text="座標容差", width=20).grid(row=2, column=0, sticky="w", pady=2)
+        ttk.Entry(df_form, textvariable=self.v_df_tol, width=12).grid(row=2, column=1, sticky="w", pady=2, padx=4)
+        df_form.columnconfigure(1, weight=1)
+        self.v_df_handles = tk.BooleanVar(value=True)
+        self.v_df_paper = tk.BooleanVar(value=True)
+        ttk.Checkbutton(diff_box, text="優先以 handle 配對物件（取消則只用類型＋圖層＋幾何）",
+                        variable=self.v_df_handles).pack(anchor="w")
+        ttk.Checkbutton(diff_box, text="包含配置（紙空間）", variable=self.v_df_paper).pack(anchor="w")
+        ttk.Checkbutton(diff_box, text="包含子資料夾", variable=self.opts["recursive"]).pack(anchor="w")
+        self.btn_diff = ttk.Button(diff_box, text="開始比對", command=self._start_diff)
+        self.btn_diff.pack(anchor="w", pady=(8, 0))
+
+        std_box = ttk.Frame(self.mode_frame)
+        self.mode_frames["layerstd"] = std_box
+        ttk.Label(std_box, text="圖層標準檢查", font=title_font).pack(anchor="w")
+        ttk.Label(
+            std_box,
+            text=("依圖層標準檔（CSV 或 JSON）檢查每張圖的圖層名稱、顏色、線型、線寬、列印設定、"
+                  "圖層 0 上的圖元、空圖層與必要圖層。\n"
+                  "DXF 直接讀取；DWG 先用 accoreconsole 轉成 DXF。原始圖檔不會被改寫。"
+                  "範例標準檔：samples\\layer_standard.csv"),
+            justify="left", wraplength=760,
+        ).pack(anchor="w", pady=(2, 6))
+        std_form = ttk.Frame(std_box)
+        std_form.pack(fill="x")
+        self.v_ls_standard = tk.StringVar(value=str(ROOT / "samples" / "layer_standard.csv"))
+        ttk.Label(std_form, text="圖層標準檔", width=14).grid(row=0, column=0, sticky="w", pady=2)
+        ttk.Entry(std_form, textvariable=self.v_ls_standard).grid(row=0, column=1, sticky="ew", pady=2)
+        self.btn_ls_browse = ttk.Button(std_form, text="瀏覽", command=self._browse_layer_standard)
+        self.btn_ls_browse.grid(row=0, column=2, padx=4)
+        std_form.columnconfigure(1, weight=1)
+        self.v_ls_overwrite = tk.BooleanVar(value=False)
+        ttk.Checkbutton(std_box, text="包含子資料夾（輸出保留相同的資料夾結構）",
+                        variable=self.opts["recursive"]).pack(anchor="w")
+        ttk.Checkbutton(std_box, text="重新轉換已存在的 DXF（layer_check\\dxf）",
+                        variable=self.v_ls_overwrite).pack(anchor="w")
+        self.btn_layerstd = ttk.Button(std_box, text="開始檢查圖層", command=self._start_layerstd)
+        self.btn_layerstd.pack(anchor="w", pady=(6, 0))
+
+        tb_read_box = ttk.Frame(self.mode_frame)
+        self.mode_frames["tb_read"] = tb_read_box
+        ttk.Label(tb_read_box, text="圖框屬性匯出", font=title_font).pack(anchor="w")
+        ttk.Label(
+            tb_read_box,
+            text=("把符合名稱的圖框 Block 屬性寫成輸出資料夾裡的 titleblock_attrs.csv"
+                  "（每個圖框一列，每個 tag 一欄），可用 Excel 編輯。不輸出 DWG、不修改原始圖檔。"),
+            justify="left", wraplength=760,
+        ).pack(anchor="w", pady=(2, 6))
+        tb_form = ttk.Frame(tb_read_box)
+        tb_form.pack(fill="x")
+        self.v_tb_blocks = tk.StringVar(value="TITLE*, 圖框*")
+        ttk.Label(tb_form, text="圖框 Block 名稱", width=14).grid(row=0, column=0, sticky="w", pady=2)
+        ttk.Entry(tb_form, textvariable=self.v_tb_blocks).grid(row=0, column=1, sticky="ew", pady=2)
+        tb_form.columnconfigure(1, weight=1)
+        ttk.Label(tb_read_box, text="名稱可用 * 與 ?，多個以逗號分隔；動態圖塊以有效名稱比對。").pack(anchor="w")
+        ttk.Checkbutton(tb_read_box, text="包含子資料夾", variable=self.opts["recursive"]).pack(anchor="w")
+        self.btn_tb_read = ttk.Button(tb_read_box, text="開始匯出圖框屬性", command=self._start_tb_read)
+        self.btn_tb_read.pack(anchor="w", pady=(6, 0))
+
+        tb_write_box = ttk.Frame(self.mode_frame)
+        self.mode_frames["tb_write"] = tb_write_box
+        ttk.Label(tb_write_box, text="圖框屬性寫回", font=title_font).pack(anchor="w")
+        ttk.Label(
+            tb_write_box,
+            text=("讀回編輯過的 titleblock_attrs.csv，只把和圖面不同的值寫回。每個 DWG 先複製到暫存檔處理，"
+                  "原始圖檔不會被改寫，變更後的 DWG 寫到輸出資料夾。"),
+            justify="left", wraplength=760,
+        ).pack(anchor="w", pady=(2, 6))
+        wb_form = ttk.Frame(tb_write_box)
+        wb_form.pack(fill="x")
+        self.v_tb_csv = tk.StringVar(value="")
+        ttk.Label(wb_form, text="寫回用 CSV", width=14).grid(row=0, column=0, sticky="w", pady=2)
+        ttk.Entry(wb_form, textvariable=self.v_tb_csv).grid(row=0, column=1, sticky="ew", pady=2)
+        self.btn_tb_csv = ttk.Button(wb_form, text="選擇…", command=self._browse_tb_csv)
+        self.btn_tb_csv.grid(row=0, column=2, padx=(6, 0), pady=2)
+        wb_form.columnconfigure(1, weight=1)
+        self.v_tb_dry = tk.BooleanVar(value=False)
+        self.v_tb_overwrite = tk.BooleanVar(value=False)
+        ttk.Checkbutton(tb_write_box, text="只預覽變更，不輸出 DWG", variable=self.v_tb_dry).pack(anchor="w")
+        ttk.Checkbutton(tb_write_box, text="覆寫既有的輸出 DWG", variable=self.v_tb_overwrite).pack(anchor="w")
+        self.btn_tb_write = ttk.Button(tb_write_box, text="開始寫回圖框屬性", command=self._start_tb_write)
+        self.btn_tb_write.pack(anchor="w", pady=(6, 0))
+
         # ---- 4 執行狀態 ----
         st = ttk.LabelFrame(main, text="④ 執行狀態")
         st.pack(fill="both", expand=True, **pad)
@@ -667,6 +806,15 @@ class App:
                        ("開啟 layerclass.log", "logs/layerclass.log"))),
             ("DWG 結果", (("開啟 scada_hits.csv", "csv/scada_hits.csv"), ("開啟 object_hits.csv", "csv/object_hits.csv"),
                          ("開啟 file_index.csv", "csv/file_index.csv"))),
+            ("差異比對", (("開啟 diff_summary.csv", "dwgdiff/diff_summary.csv"),
+                      ("開啟 diff_details.csv", "dwgdiff/diff_details.csv"),
+                      ("開啟 diff_report.json", "dwgdiff/diff_report.json"))),
+            ("圖層標準檢查", (("開啟 layer_check_report.html", "layer_check/" + layerstd.HTML_NAME),
+                        ("開啟 layer_check_summary.csv", "layer_check/" + layerstd.SUMMARY_NAME),
+                        ("開啟 layer_check_details.csv", "layer_check/layer_check_details.csv"))),
+            ("圖框屬性", (("開啟 titleblock_attrs.csv", "titleblock_attrs.csv"),
+                      ("開啟 titleblock_results.csv", "logs/titleblock_results.csv"),
+                      ("開啟 titleblock.log", "logs/titleblock.log"))),
             ("工程分析結果", (("開啟 project.db", "database/project.db"),
                          ("開啟 cross_reference.csv", "cross_reference/cross_reference.csv"),
                          ("開啟 requirements.csv", "docx/requirements.csv"), ("開啟 boq_items.csv", "excel/boq_items.csv"),
@@ -827,12 +975,14 @@ class App:
     def _set_busy_ui(self, busy):
         """Centralised enable/disable policy for all job controls."""
         state = "disabled" if busy else "normal"
-        for widget in (self.mode_buttons + self.browse_buttons +
+        for widget in (self.mode_buttons + self.browse_buttons + self.diff_browse_buttons +
                        [self.btn_select_all, self.btn_clear_all,
                         self.btn_scan, self.btn_versions, self.btn_analysis, self.btn_fontfix,
                         self.btn_proxygraphics,
                         self.btn_extract, self.btn_replace, self.btn_layer,
-                        self.btn_files, self.btn_folder, self.btn_recheck, self.btn_save_config]):
+                        self.btn_diff, self.btn_layerstd, self.btn_ls_browse, self.btn_tb_csv,
+                        self.btn_files, self.btn_folder, self.btn_recheck, self.btn_save_config,
+                        self.workers_spin]):
             widget.configure(state=state)
         self.btn_start.configure(state="normal" if not busy and self.env_ok else "disabled")
         self.btn_fontfix.configure(state="normal" if not busy and self.env_ok else "disabled")
@@ -840,6 +990,8 @@ class App:
         self.btn_extract.configure(state="normal" if not busy and self.env_ok else "disabled")
         self.btn_replace.configure(state="normal" if not busy and self.env_ok else "disabled")
         self.btn_layer.configure(state="normal" if not busy and self.env_ok else "disabled")
+        self.btn_tb_read.configure(state="normal" if not busy and self.env_ok else "disabled")
+        self.btn_tb_write.configure(state="normal" if not busy and self.env_ok else "disabled")
         selected = self._selected_modes()
         accore_needed = any(key in NEEDS_ACCORE for key in selected)
         self.btn_run_selected.configure(
@@ -891,18 +1043,43 @@ class App:
         if d:
             var.set(os.path.normpath(d))
 
+    def _browse_drawing(self, var):
+        path = filedialog.askopenfilename(title="選擇圖檔", filetypes=[("圖檔", "*.dwg *.dxf"), ("所有檔案", "*.*")])
+        if path:
+            var.set(os.path.normpath(path))
+
+    def _browse_layer_standard(self):
+        path = filedialog.askopenfilename(title="選擇圖層標準檔",
+                                          filetypes=[("圖層標準", "*.csv *.json"), ("所有檔案", "*.*")])
+        if path:
+            self.v_ls_standard.set(os.path.normpath(path))
+
+    def _browse_tb_csv(self):
+        path = filedialog.askopenfilename(title="選擇 titleblock_attrs.csv",
+                                          filetypes=[("CSV", "*.csv"), ("所有檔案", "*.*")])
+        if path:
+            self.v_tb_csv.set(os.path.normpath(path))
+
     def _keywords(self):
         return [l.strip() for l in self.kw_text.get("1.0", "end").splitlines() if l.strip()]
 
+    def _workers(self):
+        """Concurrent accoreconsole count from the ① field; anything invalid falls back to 1."""
+        return parallel.clamp_workers(self.v_workers.get())
+
+    def _accore(self):
+        """Path for jobs that may use accoreconsole; empty when none was found (per-file failures then)."""
+        return self.cfg.get("accoreconsole", "") if self.env_ok else ""
+
     def _current_cfg(self):
         return dict(self.cfg, input_dir=self.v_in.get().strip(), output_dir=self.v_out.get().strip(),
-                    keywords=self._keywords())
+                    keywords=self._keywords(), workers=self._workers())
 
     def _save_config(self):
         cfg = {k: v for k, v in self.cfg.items() if not k.startswith("_")}
         cfg.update(input_dir=self.v_in.get().strip(), output_dir=self.v_out.get().strip(),
                    keywords=self._keywords(), recursive=self.opts["recursive"].get(),
-                   overwrite=self.opts["overwrite"].get())
+                   overwrite=self.opts["overwrite"].get(), workers=self._workers())
         try:
             (ROOT / "config.json").write_text(json.dumps(cfg, ensure_ascii=False, indent=2),
                                               encoding="utf-8")
@@ -1067,7 +1244,7 @@ class App:
             big=self.v_ff_big.get().strip() or fontfix.DEFAULT_BIG,
             mapping=fontfix.parse_mapping(self.ff_map_text.get("1.0", "end")),
             recursive=self.opts["recursive"].get(), overwrite=self.v_ff_overwrite.get(),
-            timeout=int(self.cfg.get("timeout_seconds", 300)),
+            timeout=int(self.cfg.get("timeout_seconds", 300)), workers=self._workers(),
         )
 
     def _prepare_proxygraphics(self):
@@ -1091,7 +1268,7 @@ class App:
             pattern=self.v_tx_pattern.get(), mode=mode,
             case_sensitive=self.v_tx_case.get(), include_blocks=self.v_tx_blocks.get(),
             recursive=self.opts["recursive"].get(),
-            timeout=int(self.cfg.get("timeout_seconds", 300)),
+            timeout=int(self.cfg.get("timeout_seconds", 300)), workers=self._workers(),
         )
 
     def _prepare_replace(self):
@@ -1110,7 +1287,7 @@ class App:
             case_sensitive=self.v_rp_case.get(), include_blocks=self.v_rp_blocks.get(),
             dry_run=self.v_rp_dry.get(), copy_unchanged=self.v_rp_copy.get(),
             overwrite=self.v_rp_overwrite.get(), recursive=self.opts["recursive"].get(),
-            timeout=int(self.cfg.get("timeout_seconds", 300)),
+            timeout=int(self.cfg.get("timeout_seconds", 300)), workers=self._workers(),
         )
 
     def _prepare_layerclass(self):
@@ -1131,7 +1308,7 @@ class App:
             insert_by_name=self.v_ly_insert.get(), unlock_locked=self.v_ly_unlock.get(),
             keep_appearance=self.v_ly_keep.get(), dry_run=self.v_ly_dry.get(),
             overwrite=self.v_ly_overwrite.get(), recursive=self.opts["recursive"].get(),
-            timeout=int(self.cfg.get("timeout_seconds", 300)),
+            timeout=int(self.cfg.get("timeout_seconds", 300)), workers=self._workers(),
         )
 
     def _prepare_dwg(self):
@@ -1153,6 +1330,70 @@ class App:
             raise TaskError("路徑錯誤", "請選擇存在的輸入檔案／資料夾，並指定輸出資料夾。")
         return dict(cfg=cfg, inputs=inputs)
 
+    def _prepare_diff(self):
+        old, new = self.v_df_old.get().strip(), self.v_df_new.get().strip()
+        dst = self.v_out.get().strip()
+        if not old or not new or not dst:
+            raise TaskError("路徑錯誤", "請指定舊版、新版與輸出資料夾。")
+        if not Path(old).exists() or not Path(new).exists():
+            raise TaskError("路徑錯誤", "舊版或新版的檔案／資料夾不存在。")
+        # dwgdiff writes converted DXFs under the output folder; inside an input tree a later
+        # run would scan them as inputs.
+        for label, path in (("舊版", old), ("新版", new)):
+            if Path(path).is_dir():
+                problem = fontfix.directory_problem(path, dst)
+                if problem:
+                    raise TaskError("路徑錯誤", f"{label}：{problem}")
+        raw = self.v_df_tol.get().strip()
+        try:
+            tolerance = float(raw)
+        except ValueError:
+            raise TaskError("座標容差錯誤", "座標容差必須是數字。") from None
+        if tolerance < 0:
+            raise TaskError("座標容差錯誤", "座標容差不可為負數。")
+        return dict(
+            old=old, new=new, dst=dst, accore=self._accore(), tolerance=tolerance,
+            recursive=self.opts["recursive"].get(), use_handles=self.v_df_handles.get(),
+            include_paper=self.v_df_paper.get(), timeout=int(self.cfg.get("timeout_seconds", 300)),
+        )
+
+    def _prepare_layerstd(self):
+        src, dst = self._text_folders()
+        standard = self.v_ls_standard.get().strip()
+        try:
+            layerstd.load_standard(standard)
+        except (OSError, ValueError, re.error) as exc:
+            raise TaskError("圖層標準檔", str(exc)) from None
+        return dict(
+            src=src, dst=dst, standard=standard, accore=self._accore(),
+            recursive=self.opts["recursive"].get(), overwrite=self.v_ls_overwrite.get(),
+            timeout=int(self.cfg.get("timeout_seconds", 300)),
+        )
+
+    def _prepare_tb_read(self):
+        self._require_accore("匯出圖框屬性")
+        src, dst = self._text_folders()
+        patterns = self.v_tb_blocks.get()
+        problem = titleblock.validate_patterns(patterns)
+        if problem:
+            raise TaskError("圖框 Block 名稱", problem)
+        return dict(
+            src=src, dst=dst, accore=self.cfg.get("accoreconsole", ""), patterns=patterns,
+            recursive=self.opts["recursive"].get(), timeout=int(self.cfg.get("timeout_seconds", 300)),
+        )
+
+    def _prepare_tb_write(self):
+        self._require_accore("寫回圖框屬性")
+        src, dst = self._text_folders()
+        csv_path = self.v_tb_csv.get().strip()
+        if not csv_path:
+            raise TaskError("寫回圖框屬性", "請選擇編輯過的 titleblock_attrs.csv（CSV 檔）")
+        return dict(
+            src=src, dst=dst, accore=self.cfg.get("accoreconsole", ""), csv_path=csv_path,
+            dry_run=self.v_tb_dry.get(), overwrite=self.v_tb_overwrite.get(),
+            timeout=int(self.cfg.get("timeout_seconds", 300)),
+        )
+
     # ---- run: called on the worker thread; never touches tkinter ----
     def _run_scan(self, params, log, progress):
         return pipeline.scan(params["input_dir"], params["recursive"])
@@ -1172,7 +1413,7 @@ class App:
             params["src"], params["dst"], params["accore"], recursive=params["recursive"],
             primary=params["primary"], big=params["big"], mapping=params["mapping"],
             version=params["version"], overwrite=params["overwrite"], timeout=params["timeout"],
-            stop_event=self.stop_event, progress=progress, log=log,
+            workers=params["workers"], stop_event=self.stop_event, progress=progress, log=log,
         )
 
     def _run_proxygraphics(self, params, log, progress):
@@ -1187,7 +1428,8 @@ class App:
             params["src"], params["dst"], params["accore"], pattern=params["pattern"],
             mode=params["mode"], case_sensitive=params["case_sensitive"],
             include_blocks=params["include_blocks"], recursive=params["recursive"],
-            timeout=params["timeout"], stop_event=self.stop_event, progress=progress, log=log,
+            timeout=params["timeout"], workers=params["workers"],
+            stop_event=self.stop_event, progress=progress, log=log,
         )
 
     def _run_replace(self, params, log, progress):
@@ -1197,7 +1439,8 @@ class App:
             include_blocks=params["include_blocks"], color=params["color"],
             dry_run=params["dry_run"], copy_unchanged=params["copy_unchanged"],
             recursive=params["recursive"], overwrite=params["overwrite"],
-            timeout=params["timeout"], stop_event=self.stop_event, progress=progress, log=log,
+            timeout=params["timeout"], workers=params["workers"],
+            stop_event=self.stop_event, progress=progress, log=log,
         )
 
     def _run_layerclass(self, params, log, progress):
@@ -1208,7 +1451,7 @@ class App:
             include_blocks=params["include_blocks"], insert_by_name=params["insert_by_name"],
             unlock_locked=params["unlock_locked"], keep_appearance=params["keep_appearance"],
             dry_run=params["dry_run"], recursive=params["recursive"],
-            overwrite=params["overwrite"], timeout=params["timeout"],
+            overwrite=params["overwrite"], timeout=params["timeout"], workers=params["workers"],
             stop_event=self.stop_event, progress=progress, log=log,
         )
 
@@ -1219,6 +1462,35 @@ class App:
     def _run_analysis(self, params, log, progress):
         return pipeline.run_pipeline(params["cfg"], dict(multiformat=True, inputs=params["inputs"]),
                                      log=log, progress=progress, stop_event=self.stop_event)
+
+    def _run_diff(self, params, log, progress):
+        return dwgdiff.run(
+            params["old"], params["new"], params["dst"], params["accore"], tolerance=params["tolerance"],
+            recursive=params["recursive"], use_handles=params["use_handles"],
+            include_paper=params["include_paper"], timeout=params["timeout"],
+            stop_event=self.stop_event, on_progress=progress, log=log,
+        )
+
+    def _run_layerstd(self, params, log, progress):
+        return layerstd.run(
+            params["src"], params["dst"], params["standard"], params["accore"],
+            recursive=params["recursive"], overwrite=params["overwrite"], timeout=params["timeout"],
+            stop_event=self.stop_event, progress=progress, log=log,
+        )
+
+    def _run_tb_read(self, params, log, progress):
+        return titleblock_batch.run_read(
+            params["src"], params["dst"], params["accore"], patterns=params["patterns"],
+            recursive=params["recursive"], timeout=params["timeout"],
+            stop_event=self.stop_event, progress=progress, log=log,
+        )
+
+    def _run_tb_write(self, params, log, progress):
+        return titleblock_batch.run_write(
+            params["src"], params["dst"], params["accore"], csv_path=params["csv_path"],
+            dry_run=params["dry_run"], overwrite=params["overwrite"], timeout=params["timeout"],
+            stop_event=self.stop_event, progress=progress, log=log,
+        )
 
     # ---- render: turn one finished result into (state, verdict, body) ----
     @staticmethod
@@ -1363,6 +1635,49 @@ class App:
             lines.append(f"錯誤：{result['fatal']}")
         return state, verdict, "\n".join(lines) + self._failed_files_block(result.get("failed_files"))
 
+    def _render_diff(self, result):
+        if result.get("pairs", 0) == 0 and not result.get("fatal") and not result.get("stopped"):
+            state, verdict = "warning", "沒有找到可比對的 DWG / DXF"
+        else:
+            state, verdict = classify_outcome(result)
+        lines = [
+            f"配對：{result.get('pairs', 0)}　有差異：{result.get('changed', 0)}　"
+            f"相同：{result.get('identical', 0)}　只在一邊：{result.get('skipped', 0)}　"
+            f"失敗：{result.get('failed', 0)}",
+            f"新增：{result.get('added', 0)}　刪除：{result.get('removed', 0)}　修改：{result.get('modified', 0)}",
+            "結果：dwgdiff/diff_summary.csv、dwgdiff/diff_details.csv",
+        ]
+        if result.get("fatal"):
+            lines.append(f"錯誤：{result['fatal']}")
+        return state, verdict, "\n".join(lines) + self._failed_files_block(result.get("failed_files"))
+
+    def _render_layerstd(self, result):
+        if result.get("dwg", 0) == 0 and not result.get("fatal") and not result.get("stopped"):
+            state, verdict = "warning", "沒有找到 DWG / DXF"
+        else:
+            state, verdict = classify_outcome(result)
+            if state == "success" and result.get("violations"):
+                state, verdict = "warning", "檢查完成，有圖層不符合標準"
+        lines = [
+            f"檔案：{result.get('dwg', 0)}　已檢查：{result.get('ok', 0)}　失敗：{result.get('failed', 0)}",
+            f"違規：{result.get('violations', 0)}（錯誤 {result.get('errors', 0)}）",
+            "報告：layer_check/layer_check_report.html",
+        ]
+        if result.get("fatal"):
+            lines.append(f"錯誤：{result['fatal']}")
+        return state, verdict, "\n".join(lines) + self._failed_files_block(result.get("failed_files"))
+
+    def _render_tb_read(self, result):
+        if result.get("csv"):
+            self.v_tb_csv.set(result["csv"])   # ready for 寫回 without browsing
+        return self._render_text_result(result, f"圖框數：{result.get('blocks', 0)}", "titleblock_attrs.csv")
+
+    def _render_tb_write(self, result):
+        return self._render_text_result(
+            result,
+            f"變更筆數：{result.get('changes', 0)}　無變更：{result.get('unchanged', 0)}",
+            "logs/titleblock_results.csv")
+
     # ---- single-task compatibility entry points ----
     def _scan(self):
         self._start_tasks(["scan"])
@@ -1384,6 +1699,18 @@ class App:
 
     def _start_layerclass(self):
         self._start_tasks(["layerclass"])
+
+    def _start_diff(self):
+        self._start_tasks(["diff"])
+
+    def _start_layerstd(self):
+        self._start_tasks(["layerstd"])
+
+    def _start_tb_read(self):
+        self._start_tasks(["tb_read"])
+
+    def _start_tb_write(self):
+        self._start_tasks(["tb_write"])
 
     def _on_fontfix_done(self, result):
         self._show_finished("fontfix", result)
