@@ -38,12 +38,18 @@ _TEXT_DUMP = [
 ]
 
 
+def _is_qsave(raw: str) -> bool:
+    folded = raw.upper()
+    return folded in {"_.QSAVE", "_QSAVE"} or '(COMMAND "_.QSAVE")' in folded
+
+
 def _messages_for(script_text: str) -> list[str]:
     lines = script_text.splitlines()
     text_dump = "tx-dump-current" in script_text
     text_apply = "tx-apply-" in script_text
     layer_mode = "lc-run" in script_text
-    messages = [] if text_dump or text_apply or layer_mode else ["FONTFIX_READY"]
+    proxy_mode = "pg-run" in script_text
+    messages = [] if text_dump or text_apply or layer_mode or proxy_mode else ["FONTFIX_READY"]
     pending = ""
     index = 0
     while index < len(lines):
@@ -76,18 +82,46 @@ def _messages_for(script_text: str) -> list[str]:
                     messages.append("LAYERCLASS_READY")
                 else:
                     messages.extend(_LAYER_DUMP)
+            elif proxy_mode:
+                pass  # Proxy markers are emitted by the load/run commands below.
             else:
                 sep = "|=|"
-                messages.append(f"FONTFIX_REPLACED{sep}Standard{sep}missing.shx{sep}romans.shx{sep}{sep}")
-                messages.append(f"FONTFIX_SUMMARY{sep}1{sep}0")
-        elif upper in {"_.QSAVE", "_QSAVE"} and pending and Path(pending).is_file():
+                if b"FONTFIX_TEST_CLEAN" in payload:
+                    messages.append(f"FONTFIX_SUMMARY{sep}0{sep}0")
+                elif b"FONTFIX_TEST_SHAPE" in payload:
+                    messages.append(f"FONTFIX_SHAPE{sep}missing_shape_file.shx{sep}AB12{sep}")
+                    messages.append(f"FONTFIX_SUMMARY{sep}0{sep}0")
+                else:
+                    messages.append(f"FONTFIX_REPLACED{sep}Standard{sep}missing.shx{sep}romans.shx{sep}{sep}")
+                    messages.append(f"FONTFIX_SUMMARY{sep}1{sep}0")
+        elif proxy_mode and raw.startswith('(load '):
+            messages.append("PROXYGRAPHICS_READY")
+        elif proxy_mode and "(pg-run)" in raw:
+            current = Path(pending).read_bytes() if pending and Path(pending).is_file() else b""
+            if b"\nPROXYGRAPHICS=1" in current:
+                messages.append("PROXYGRAPHICS_RESULT|=|1|=|1")
+            else:
+                messages.append("PROXYGRAPHICS_RESULT|=|0|=|1")
+        elif _is_qsave(raw) and pending and Path(pending).is_file():
             path = Path(pending)
             data = path.read_bytes()
-            if text_apply and b"\nTEXTAPPLIED" not in data:
-                data += b"\nTEXTAPPLIED"
-            if layer_mode and b"\nLAYERAPPLIED" not in data:
-                data += b"\nLAYERAPPLIED"
-            path.write_bytes(data)
+            folded = raw.upper()
+            unchanged_font = "*FF-CHANGED*" in folded and (
+                b"FONTFIX_TEST_CLEAN" in data or b"FONTFIX_TEST_SHAPE" in data
+            )
+            already_proxy = "*PG-BEFORE*" in folded and b"\nPROXYGRAPHICS=1" in data
+            if not unchanged_font and not already_proxy:
+                if text_apply and b"\nTEXTAPPLIED" not in data:
+                    data += b"\nTEXTAPPLIED"
+                if layer_mode and b"\nLAYERAPPLIED" not in data:
+                    data += b"\nLAYERAPPLIED"
+                if proxy_mode and b"\nPROXYGRAPHICS=1" not in data:
+                    data += b"\nPROXYGRAPHICS=1"
+                elif proxy_mode:
+                    data += b"\nFORCEDSAVE"
+                if not (text_dump or text_apply or layer_mode or proxy_mode):
+                    data += b"\nQSAVED"
+                path.write_bytes(data)
         elif upper in {"_.SAVEAS", "_SAVEAS"} and index + 2 < len(lines):
             target = lines[index + 2].strip().strip('"')
             if pending and Path(pending).is_file():

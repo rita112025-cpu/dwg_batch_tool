@@ -81,6 +81,8 @@ def test_extension_at_prefix_and_support_path():
     assert fontfix.is_missing("genie.shx", support)
     assert fontfix.is_missing("sino2.shx", support)
     assert not fontfix.is_missing("@PMingLiU.ttf", _ctx())  # vertical face is skipped
+    assert fontfix.is_missing("@chinaset", support)         # missing vertical SHX is repaired
+    assert not fontfix.is_missing("@chinaset", _ctx(support_files=["@chinaset.shx"]))
     assert not fontfix.is_missing("", support)
     assert not fontfix.is_missing(None, support)
 
@@ -159,6 +161,28 @@ def test_folder_listing_mirrors_subfolders_and_ignores_case(tmp_path):
     assert fontfix.output_for(both[0], src, tmp_path / "out", False) == tmp_path / "out" / "A.DWG"
 
 
+def test_fontfix_listing_includes_dwt_but_other_modes_stay_on_dwg(tmp_path):
+    src = tmp_path / "in"
+    (src / "sub").mkdir(parents=True)
+    _dwg(src / "A.DWG")
+    _dwg(src / "Template.DWT")
+    _dwg(src / "sub" / "arch.dwt")
+    (src / "note.txt").write_text("x", encoding="utf-8")
+    (src / "skip.dxf").write_bytes(HEADER)
+    (src / "backup.dwt.bak").write_bytes(HEADER)
+    assert [p.name for p in fontfix.iter_dwgs(src, recursive=True)] == ["A.DWG"]
+    found = fontfix.iter_dwgs(src, True, fontfix.FONTFIX_SUFFIXES)
+    assert {p.name for p in found} == {"A.DWG", "Template.DWT", "arch.dwt"}
+    assert [os.path.normcase(str(p)) for p in found] == sorted(
+        os.path.normcase(str(p)) for p in found
+    )
+    by_name = {p.name: p for p in found}
+    out = tmp_path / "out"
+    assert fontfix.output_for(by_name["Template.DWT"], src, out, True) == out / "Template.DWT"
+    assert fontfix.output_for(by_name["arch.dwt"], src, out, True) == out / "sub" / "arch.dwt"
+    assert fontfix.output_for(by_name["Template.DWT"], src, out, False).name == "Template.DWT"
+
+
 # ---------------------------------------------------------------------------
 # Generated LISP / script
 # ---------------------------------------------------------------------------
@@ -175,6 +199,7 @@ def test_generated_lisp_is_utf8_and_does_not_use_or_as_a_value():
     assert "(findfile probe)" in src
     assert "(entmod ned)" in src
     assert "(substr fn 1 1)" in src
+    assert '(ff-ttf-p (ff-probe fn))' in src
     assert '".TTF"' in src and '".TTC"' in src and '".OTF"' in src
     raw = fontfix.lisp_bytes(src)
     assert raw.startswith(b"\xef\xbb\xbf")
@@ -202,6 +227,22 @@ def test_generated_lisp_is_utf8_and_does_not_use_or_as_a_value():
     fontfix.script_bytes(script)
 
 
+def test_script_qsaves_only_after_a_style_change():
+    script = fontfix.build_script(
+        [{"spath": "C:/temp/in_abc.dwg"}], "C:/temp/fontfix_run.lsp"
+    )
+    assert "(> *ff-changed* 0)" in script
+    assert '(command "_.QSAVE")' in script
+    assert "\n_.QSAVE\n" not in script
+    assert '(command "_.CLOSE" "N")' in script
+    versioned = fontfix.build_script(
+        [{"spath": "C:/temp/in_abc.dwg", "save_version": "2013", "save_path": "C:/temp/out_abc.dwg"}],
+        "C:/temp/fontfix_run.lsp",
+    )
+    assert "_.SAVEAS" in versioned
+    assert '(command "_.QSAVE")' not in versioned
+
+
 def _rows(parsed):
     return [
         (row["style"], row["old_primary"], row["new_primary"], row["old_big"], row["new_big"])
@@ -227,6 +268,22 @@ def test_parse_markers():
     assert parsed["still_missing"][0]["style"] == "Weird"
     assert "ACSE | sino2.shx -> romans.shx" in fontfix.replacement_text(parsed["replacements"])
     assert "主=missing.shx" in fontfix.still_text(parsed["still_missing"])
+
+
+def test_parse_reports_shape_files_apart_from_missing_fonts():
+    sep = fontfix.MARKER_SEP
+    text = (
+        f"FONTFIX_STILL{sep}Weird{sep}missing.shx{sep}\n"
+        f"FONTFIX_SHAPE{sep}missing_shape_file.shx{sep}AB12{sep}\n"
+        f"FONTFIX_SUMMARY{sep}0{sep}1\n"
+    )
+    parsed = fontfix.parse_fontfix_output(text)
+    assert parsed["still_missing"][0]["style"] == "Weird"
+    assert parsed["shape_gaps"] == [
+        {"file": "missing_shape_file.shx", "handle": "AB12", "name": ""}
+    ]
+    assert "missing_shape_file.shx" in fontfix.shape_text(parsed["shape_gaps"])
+    assert "形狀檔未處理" in fontfix.shape_text(parsed["shape_gaps"])
 
 
 def test_parse_pipe_separator_keeps_spaces_and_empty_fields():
@@ -416,16 +473,159 @@ def test_batch_copies_chinese_paths_and_leaves_the_source_alone(tmp_path):
     assert seen and seen[-1][0] == 2 and seen[-1][1] == 2
 
 
+def test_unchanged_drawing_is_published_as_the_original_bytes(tmp_path):
+    src = tmp_path / "in"
+    drawing = src / "clean.dwg"
+    _dwg(drawing, extra=b"FONTFIX_TEST_CLEAN")
+    original = drawing.read_bytes()
+    dst = tmp_path / "out"
+    summary = _run(src, dst, recursive=False)
+    assert summary["fatal"] == ""
+    assert (summary["ok"], summary["failed"], summary["warnings"]) == (1, 0, 0)
+    assert summary["styles_replaced"] == 0
+    assert (dst / "clean.dwg").read_bytes() == original
+
+
+def test_shape_gaps_do_not_raise_a_missing_font_warning(tmp_path):
+    src = tmp_path / "in"
+    drawing = src / "shapes.dwg"
+    _dwg(drawing, extra=b"FONTFIX_TEST_SHAPE")
+    original = drawing.read_bytes()
+    dst = tmp_path / "out"
+    summary = _run(src, dst, recursive=False)
+    assert summary["fatal"] == ""
+    assert (summary["ok"], summary["warnings"]) == (1, 0)
+    result = summary["results"][0]
+    assert result["still_missing"] == ""
+    assert "missing_shape_file.shx" in result["shape_gaps"]
+    assert "形狀檔未處理" in result["shape_gaps"]
+    assert (dst / "shapes.dwg").read_bytes() == original
+    log = (dst / "logs" / "fontfix.log").read_text(encoding="utf-8")
+    assert "形狀檔未處理" in log
+    assert "仍缺字" not in log
+    with (dst / "logs" / "fontfix_results.csv").open(encoding="utf-8-sig", newline="") as fh:
+        row = next(csv.DictReader(fh))
+    assert row["仍缺字"] == ""
+    assert "missing_shape_file.shx" in row["形狀檔未處理"]
+
+
+def test_copy_hashed_matches_the_source_digest(tmp_path):
+    from convert_single import copy_hashed
+
+    src = tmp_path / "a.dwg"
+    _dwg(src, extra=b"payload")
+    dest = tmp_path / "nested" / "b.dwg"
+    digest = copy_hashed(src, dest)
+    assert digest == _sha(src)
+    assert dest.read_bytes() == src.read_bytes()
+
+
+def test_batch_hashes_the_source_once(tmp_path, monkeypatch):
+    src = tmp_path / "in"
+    drawing = src / "a.dwg"
+    _dwg(drawing)
+    calls = []
+    real = fontfix_batch.sha256
+
+    def spy(path, *args, **kwargs):
+        calls.append(str(path))
+        return real(path, *args, **kwargs)
+
+    monkeypatch.setattr(fontfix_batch, "sha256", spy)
+    summary = _run(src, tmp_path / "out", recursive=False)
+    assert summary["ok"] == 1
+    assert calls.count(str(drawing)) == 1
+
+
+def test_dwt_is_repaired_as_dwt_and_source_is_untouched(tmp_path, monkeypatch):
+    src = tmp_path / "輸入"
+    (src / "子").mkdir(parents=True)
+    upper = src / "樣板.DWT"
+    lower = src / "子" / "arch.dwt"
+    drawing = src / "圖.DWG"
+    _dwg(upper, extra=b"UPPER")
+    _dwg(lower, extra=b"LOWER")
+    _dwg(drawing, extra=b"DWG")
+    (src / "說明.txt").write_text("不是圖", encoding="utf-8")
+    before = {path: _sha(path) for path in (upper, lower, drawing)}
+    seen = {}
+    real_build = fontfix.build_script
+
+    def capture(jobs, lisp_path):
+        seen["jobs"] = [
+            {"spath": job.get("spath", ""), "save_path": job.get("save_path", "")}
+            for job in jobs
+        ]
+        return real_build(jobs, lisp_path)
+
+    monkeypatch.setattr(fontfix, "build_script", capture)
+    dst = tmp_path / "輸出"
+    summary = _run(src, dst, recursive=True)
+    assert summary["fatal"] == ""
+    assert (summary["dwg"], summary["ok"], summary["failed"], summary["skipped"]) == (3, 3, 0, 0)
+    for origin, digest in before.items():
+        assert _sha(origin) == digest
+        assert origin.read_bytes()[:6] == b"AC1032"
+    assert (dst / "樣板.DWT").is_file()
+    assert (dst / "子" / "arch.dwt").is_file()
+    assert (dst / "圖.DWG").is_file()
+    assert not (dst / "樣板.dwg").exists()
+    assert not (dst / "子" / "arch.dwg").exists()
+    assert (dst / "樣板.DWT").read_bytes()[:6] == b"AC1032"
+    assert (dst / "子" / "arch.dwt").suffix == ".dwt"
+    assert seen["jobs"]
+    assert all(job["spath"].lower().endswith(".dwg") for job in seen["jobs"])
+    assert all(not job["spath"].lower().endswith(".dwt") for job in seen["jobs"])
+    with (dst / "logs" / "fontfix_results.csv").open(encoding="utf-8-sig", newline="") as fh:
+        rows = list(csv.DictReader(fh))
+    outputs = {row["輸出"] for row in rows}
+    assert any(path.endswith("樣板.DWT") for path in outputs)
+    assert any(path.endswith("arch.dwt") for path in outputs)
+    written = (dst / "樣板.DWT").read_bytes()
+    second = _run(src, dst, recursive=True, overwrite=False)
+    assert second["skipped"] == 3 and second["ok"] == 0
+    assert (dst / "樣板.DWT").read_bytes() == written
+    assert _sha(upper) == before[upper]
+    third = _run(src, dst, recursive=True, overwrite=True, version="2013")
+    assert third["ok"] == 3 and third["failed"] == 0
+    assert (dst / "樣板.DWT").read_bytes().endswith(b"\nSAVEAS")
+    assert (dst / "子" / "arch.dwt").read_bytes().endswith(b"\nSAVEAS")
+    assert not (dst / "樣板.dwg").exists()
+    assert _sha(upper) == before[upper]
+    assert _sha(lower) == before[lower]
+
+
+def test_refuses_to_publish_a_dwt_onto_its_source(tmp_path, monkeypatch):
+    src = tmp_path / "in"
+    template = src / "arch.DWT"
+    _dwg(template, extra=b"ORIGINAL")
+    digest = _sha(template)
+    monkeypatch.setattr(fontfix, "output_for", lambda *args, **kwargs: template)
+    summary = _run(src, tmp_path / "out", recursive=False, overwrite=True)
+    assert summary["ok"] == 0 and summary["failed"] == 1
+    assert "覆寫" in summary["failed_files"][0]
+    assert _sha(template) == digest
+    assert template.read_bytes().endswith(b"ORIGINAL")
+    assert not (tmp_path / "out" / "arch.DWT").exists()
+    assert not (tmp_path / "out" / "arch.dwg").exists()
+
+
 def test_flat_output_when_subfolders_are_off(tmp_path):
     src = tmp_path / "in"
     (src / "sub").mkdir(parents=True)
     _dwg(src / "only.dwg")
+    _dwg(src / "top.DWT")
     _dwg(src / "sub" / "skip.dwg")
+    _dwg(src / "sub" / "skip.dwt")
+    digest = _sha(src / "top.DWT")
     dst = tmp_path / "out"
     summary = _run(src, dst, recursive=False)
-    assert summary["dwg"] == 1 and summary["ok"] == 1
+    assert summary["dwg"] == 2 and summary["ok"] == 2
     assert (dst / "only.dwg").is_file()
+    assert (dst / "top.DWT").is_file()
+    assert not (dst / "top.dwg").exists()
     assert not (dst / "sub").exists()
+    assert _sha(src / "top.DWT") == digest
 
 
 def test_readonly_source_is_not_modified(tmp_path):
@@ -533,6 +733,19 @@ def test_fontfix_mode_widgets_and_same_folder_guard(monkeypatch, tk_root, tmp_pa
     app.v_mode.set("fontfix")
     app._refresh_mode_ui()
     assert app.mode_frames["fontfix"].winfo_manager()
+    labels = []
+
+    def _collect(widget):
+        try:
+            labels.append(widget.cget("text"))
+        except Exception:
+            pass
+        for child in widget.winfo_children():
+            _collect(child)
+
+    _collect(app.mode_frames["fontfix"])
+    assert any("DWT" in text and "不會修改原始圖檔" in text for text in labels)
+    assert any(text == "覆寫既有的輸出 DWG / DWT" for text in labels)
     assert sum(bool(frame.winfo_manager()) for frame in app.mode_frames.values()) == 1
     assert app.v_ff_primary.get() == "romans.shx"
     assert app.v_ff_big.get() == "chineset.shx"
@@ -568,7 +781,7 @@ def test_fontfix_mode_widgets_and_same_folder_guard(monkeypatch, tk_root, tmp_pa
     app.opts["recursive"].set(True)
     app._start_fontfix()
     deadline = time.time() + 5
-    while app.summary is None and time.time() < deadline:
+    while (app.summary is None or app._busy() or app._batch is not None) and time.time() < deadline:
         tk_root.update()
         time.sleep(0.05)
     assert calls["kwargs"]["mapping"]["SINO2.SHX"] == "txt.shx"
@@ -576,7 +789,13 @@ def test_fontfix_mode_widgets_and_same_folder_guard(monkeypatch, tk_root, tmp_pa
     assert calls["kwargs"]["version"] == ""
     assert calls["kwargs"]["primary"] == "romans.shx"
     assert "成功" in app.v_result.get()
+    assert "DWG/DWT：" in app.v_result.get()
     assert str(app.btn_fontfix["state"]) == "normal"
+    app._on_fontfix_done(dict(
+        dwg=0, ok=0, failed=0, skipped=0, warnings=0, styles_replaced=0,
+        stopped=False, fatal="", failed_files=[], still_files=[],
+    ))
+    assert "沒有找到 DWG 或 DWT" in app.v_result.get()
 
 
 # ---------------------------------------------------------------------------
@@ -592,6 +811,35 @@ def _scripted_accore(accore, lines, folder):
     log = folder / "console.txt"
     log.write_text(decode_console(out) + "\n" + decode_console(err), encoding="utf-8")
     return rc, why, log.read_text(encoding="utf-8")
+
+
+@pytest.mark.accore
+def test_accoreconsole_publishes_an_unchanged_drawing_byte_for_byte(tmp_path):
+    """No missing text style means no QSAVE, so the output bytes stay the source."""
+    ezdxf = pytest.importorskip("ezdxf")
+    from convert_single import safe_tmpdir
+
+    accore = load_config()["accoreconsole"]
+    work = safe_tmpdir(tmp_path / "logs")
+    doc = ezdxf.new()
+    doc.styles.get("Standard").dxf.font = "txt.shx"
+    source_dxf = work / "clean.dxf"
+    doc.saveas(source_dxf)
+    src = tmp_path / "in"
+    src.mkdir()
+    source = src / "clean.dwg"
+    _rc, why, console = _scripted_accore(accore, [
+        "FILEDIA", "0", "CMDDIA", "0", "EXPERT", "5", "FONTALT", "txt.shx",
+        "_.OPEN", f'"{source_dxf.as_posix()}"',
+        "_.SAVEAS", "2018", f'"{source.as_posix()}"', "_.QUIT",
+    ], work / "setup")
+    assert not why and source.is_file(), console
+    original = source.read_bytes()
+    dst = tmp_path / "out"
+    summary = fontfix_batch.run(src, dst, accore, recursive=False, timeout=180)
+    assert not summary["fatal"] and summary["ok"] == 1, summary
+    assert summary["styles_replaced"] == 0 and summary["warnings"] == 0, summary
+    assert (dst / "clean.dwg").read_bytes() == original
 
 
 @pytest.mark.accore
@@ -655,3 +903,57 @@ def test_accoreconsole_replaces_missing_fonts_and_keeps_installed_ones(tmp_path)
     assert styles["MISSING"][1].lower() == "chineset.shx"
     assert styles["VERT"][0].startswith("@")
     assert "jhenghei" in styles["JHEI"][0].lower()
+
+
+@pytest.mark.accore
+def test_accoreconsole_preserves_shape_records_and_repairs_text(tmp_path):
+    """Missing shape definitions must never be replaced with a text font."""
+    ezdxf = pytest.importorskip("ezdxf")
+    from convert_single import safe_tmpdir
+
+    accore = load_config()["accoreconsole"]
+    work = safe_tmpdir(tmp_path / "logs")
+    doc = ezdxf.new()
+    doc.styles.new("REPAIR_TEXT", dxfattribs={"font": "missing_text_font.shx"})
+    doc.styles.get_shx("missing_shape_file.shx")
+    doc.styles.get_shx("another_missing_shape.shx")
+    doc.styles.get_shx("ltypeshp.shx")
+    source_dxf = work / "shapes.dxf"
+    doc.saveas(source_dxf)
+    src = tmp_path / "in"
+    src.mkdir()
+    source = src / "shapes.dwg"
+    rc, why, console = _scripted_accore(accore, [
+        "FILEDIA", "0", "CMDDIA", "0", "EXPERT", "5", "FONTALT", "txt.shx",
+        "_.OPEN", f'"{source_dxf.as_posix()}"',
+        "_.SAVEAS", "2018", f'"{source.as_posix()}"', "_.QUIT",
+    ], work / "setup")
+    assert not why and source.is_file(), console
+    digest = _sha(source)
+    dst = tmp_path / "out"
+    summary = fontfix_batch.run(src, dst, accore, recursive=False, timeout=180)
+    assert not summary["fatal"] and summary["ok"] == 1, summary
+    assert _sha(source) == digest
+    result = summary["results"][0]
+    assert [row["style"] for row in result["replacement_rows"]] == ["REPAIR_TEXT"]
+    assert result["still_missing"] == ""
+    assert summary["warnings"] == 0
+    assert {row["file"].lower() for row in result["shape_rows"]} == {
+        "missing_shape_file.shx", "another_missing_shape.shx",
+    }
+    assert "形狀檔未處理" in result["shape_gaps"]
+
+    back = work / "shapes_back.dxf"
+    fixed = dst / "shapes.dwg"
+    rc, why, console = _scripted_accore(accore, [
+        "FILEDIA", "0", "CMDDIA", "0", "EXPERT", "5", "FONTALT", "txt.shx",
+        "_.OPEN", f'"{fixed.as_posix()}"',
+        "_.SAVEAS", "DXF", "", f'"{back.as_posix()}"', "_.QUIT",
+    ], work / "verify")
+    assert not why and back.is_file(), console
+    saved = ezdxf.readfile(back)
+    assert saved.styles.get("REPAIR_TEXT").dxf.font.lower() == "romans.shx"
+    for filename in ("missing_shape_file.shx", "another_missing_shape.shx", "ltypeshp.shx"):
+        shape = saved.styles.find_shx(filename)
+        assert shape is not None, filename
+        assert shape.dxf.flags & 1
