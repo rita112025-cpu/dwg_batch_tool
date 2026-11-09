@@ -10,6 +10,12 @@ The rules match the validated FONTFIX AutoLISP prototype:
 * Missing primary fonts become the default primary (``romans.shx``). Missing big fonts
   become the default big font (``chineset.shx``). An ``old=new`` map overrides that.
 * Installed fonts are left alone.
+* Shape-file records (STYLE flag 70 bit 1) and nameless records are preserved.
+  A missing shape file is reported as ``FONTFIX_SHAPE`` and is not a missing
+  text font. The script QSAVEs only when at least one text style changed.
+  An explicit SAVEAS version is still written, because that version change is
+  the requested edit. An unchanged drawing that AutoCAD marked dirty is closed
+  without saving, so the published file stays the original bytes.
 
 AutoLISP ``or`` returns ``T`` rather than the value that succeeded. The generated LISP
 never uses ``or`` to choose a path or a font name.
@@ -158,11 +164,15 @@ def _stem(name):
 def is_missing(name, ctx):
     """True when this style font should be replaced.
 
-    Empty names and names starting with ``@`` are not missing (they are skipped).
+    Empty names and vertical TrueType faces are skipped.  An ``@`` prefix alone
+    is not enough to skip an SHX font: drawings can contain missing big-font
+    names such as ``@chinaset``.
     """
-    if not isinstance(name, str) or name == "" or name.startswith("@"):
+    if not isinstance(name, str) or name == "":
         return False
     probe = lookup_filename(name)
+    if name.startswith("@") and _extension(probe).lower() in TTF_EXTENSIONS:
+        return False
     key = _file_key(probe)
     if key in ctx.support_files or key in ctx.font_dir_files:
         return False
@@ -262,10 +272,21 @@ def directory_problem(input_dir, output_dir):
     return "輸出資料夾不可放在輸入資料夾裡面"
 
 
-def iter_dwgs(folder, recursive):
+# Missing-font repair accepts drawing templates as well as drawings.
+# Layer classification and text modes keep the iter_dwgs default (.dwg only).
+FONTFIX_SUFFIXES = (".dwg", ".dwt")
+
+
+def iter_dwgs(folder, recursive, suffixes=(".dwg",)):
+    """Drawing files in ``folder``, or below it when ``recursive``.
+
+    Suffixes are compared case-insensitively. The default remains ``.dwg`` so
+    callers other than font-fix do not start reading templates.
+    """
     folder = Path(folder)
+    allowed = {str(suffix).lower() for suffix in suffixes}
     walker = folder.rglob("*") if recursive else folder.glob("*")
-    found = [p for p in walker if p.is_file() and p.suffix.lower() == ".dwg"]
+    found = [p for p in walker if p.is_file() and p.suffix.lower() in allowed]
     return sorted(found, key=lambda p: os.path.normcase(str(p)))
 
 
@@ -450,7 +471,8 @@ def build_lisp(primary, big, mapping, typefaces, font_dirs):
 (defun ff-missing-p (fn)
   (and (= (type fn) 'STR)
        (/= fn "")
-       (/= (substr fn 1 1) "@")
+       (not (and (= (substr fn 1 1) "@")
+                 (ff-ttf-p (ff-probe fn))))
        (not (ff-exists-p fn))))
 
 (defun ff-target (fn default / pair)
@@ -460,6 +482,13 @@ def build_lisp(primary, big, mapping, typefaces, font_dirs):
 (defun ff-dxf (code ed / pair)
   (setq pair (assoc code ed))
   (ff-str (if pair (cdr pair) "")))
+
+(defun ff-text-style-p (ed / flags)
+  ;; DXF 70 bit 1 denotes a shape-file record, not a text font.
+  ;; Nameless records are also preserved even if their flags are malformed.
+  (setq flags (cdr (assoc 70 ed)))
+  (and (/= (ff-dxf 2 ed) "")
+       (or (not flags) (= 0 (logand 1 flags)))))
 
 (defun ff-put (ed code val / old)
   (setq old (assoc code ed))
@@ -473,13 +502,15 @@ def build_lisp(primary, big, mapping, typefaces, font_dirs):
     en
     (progn
       (setq name (cdr (assoc 2 rec)))
-      (if (= (type name) 'STR) (tblobjname "STYLE" name) nil))))
+      ;; tblobjname with an empty name can return a different shape record.
+      (if (ff-text-style-p rec) (tblobjname "STYLE" name) nil))))
 
 (defun ff-collect (/ rec names en)
   (setq rec (tblnext "STYLE" T) names nil)
   (while rec
     (setq en (ff-ename rec))
-    (if en (setq names (cons en names)))
+    (if (and en (ff-text-style-p (entget en)))
+      (setq names (cons en names)))
     (setq rec (tblnext "STYLE")))
   names)
 
@@ -518,12 +549,12 @@ def build_lisp(primary, big, mapping, typefaces, font_dirs):
         changed nil
         ned ed
         ok nil)
-  (if (ff-missing-p pf)
+  (if (and (ff-text-style-p ed) (ff-missing-p pf))
     (progn
       (setq newpf (ff-target pf *ff-primary*))
       (setq ned (ff-put ned 3 newpf))
       (setq changed T)))
-  (if (ff-missing-p bf)
+  (if (and (ff-text-style-p ed) (ff-missing-p bf))
     (progn
       (setq newbf (ff-target bf *ff-big*))
       (setq ned (ff-put ned 4 newbf))
@@ -542,27 +573,35 @@ def build_lisp(primary, big, mapping, typefaces, font_dirs):
   (while rec
     (setq en (ff-ename rec))
     (setq ed (if en (entget en) rec))
-    (setq name (ff-clean (ff-dxf 2 ed))
-          pf (ff-dxf 3 ed)
+    (setq pf (ff-dxf 3 ed)
           bf (ff-dxf 4 ed))
-    (if (or (ff-missing-p pf) (ff-missing-p bf))
-      (progn
-        (setq n (1+ n))
-        (ff-emit (strcat "FONTFIX_STILL{MARKER_SEP}" name "{MARKER_SEP}" (ff-clean pf) "{MARKER_SEP}" (ff-clean bf)))))
+    (if (ff-text-style-p ed)
+      (if (or (ff-missing-p pf) (ff-missing-p bf))
+        (progn
+          (setq n (1+ n))
+          (setq name (ff-clean (ff-dxf 2 ed)))
+          (ff-emit (strcat "FONTFIX_STILL{MARKER_SEP}" name "{MARKER_SEP}" (ff-clean pf) "{MARKER_SEP}" (ff-clean bf)))))
+      (if (ff-missing-p pf)
+        (ff-emit (strcat "FONTFIX_SHAPE{MARKER_SEP}" (ff-clean pf)
+                         "{MARKER_SEP}" (ff-clean (ff-dxf 5 ed))
+                         "{MARKER_SEP}" (ff-clean (ff-dxf 2 ed))))))
     (setq rec (tblnext "STYLE")))
   n)
 
 (defun ff-fix-current (/ names n en still olderr)
   (setq olderr *error*
         names (ff-collect)
-        n 0)
+        n 0
+        *ff-changed* 0)
   (defun *error* (msg)
+    (setq *ff-changed* 0)
     (ff-emit (strcat "FONTFIX_ERROR{MARKER_SEP}" (ff-clean msg)))
     (ff-emit "FONTFIX_SUMMARY{MARKER_SEP}0{MARKER_SEP}0")
     (setq *error* olderr)
     (princ))
   (foreach en names
     (if (ff-fix-one en) (setq n (1+ n))))
+  (setq *ff-changed* n)
   (setq still (ff-verify))
   (ff-emit (strcat "FONTFIX_SUMMARY{MARKER_SEP}" (itoa n) "{MARKER_SEP}" (itoa still)))
   (setq *error* olderr)
@@ -624,16 +663,23 @@ def build_script(jobs, lisp_path):
         lines.append(
             f'(princ (strcat "\\nDWGB" "ATCH_OPEN_{i}|" (getvar "DWGNAME") "|\\n"))'
         )
-        lines.append(
-            '(if (and (boundp \'ff-fix-current) ff-fix-current) '
-            f'(ff-fix-current) (princ (strcat "\\nFONTFIX_" "ERROR{MARKER_SEP}lisp not loaded\\n")))'
-        )
         if job.get("save_version"):
+            # The requested version is itself a change, so SAVEAS always runs.
+            lines.append(
+                '(if (and (boundp \'ff-fix-current) ff-fix-current) '
+                f'(ff-fix-current) (princ (strcat "\\nFONTFIX_" "ERROR{MARKER_SEP}lisp not loaded\\n")))'
+            )
             lines.append("_.SAVEAS")
             lines.append(str(job["save_version"]))
             lines.append(f'"{job["save_path"]}"')
         else:
-            lines.append("_.QSAVE")
+            lines.append(
+                '(if (and (boundp \'ff-fix-current) ff-fix-current) '
+                '(progn (ff-fix-current) '
+                '(if (> *ff-changed* 0) (command "_.QSAVE") '
+                '(if (> (getvar "DBMOD") 0) (command "_.CLOSE" "N")))) '
+                f'(princ (strcat "\\nFONTFIX_" "ERROR{MARKER_SEP}lisp not loaded\\n")))'
+            )
         lines.append(f'(princ (strcat "\\nDWGB" "ATCH_DONE_{i}_\\n"))')
     lines.append("_.QUIT")
     text = "\n".join(lines) + "\n"
@@ -714,6 +760,10 @@ def parse_fontfix_output(text):
     for rest in _marker_rests(text, "FONTFIX_STILL"):
         style, primary, big = _split_fields(rest, 3)
         still.append({"style": style, "primary": primary, "big": big})
+    shapes = []
+    for rest in _marker_rests(text, "FONTFIX_SHAPE"):
+        filename, handle, name = _split_fields(rest, 3)
+        shapes.append({"file": filename, "handle": handle, "name": name})
     summary = None
     found = [pair for pair in (_summary_pair(rest) for rest in _marker_rests(text, "FONTFIX_SUMMARY")) if pair]
     if found:
@@ -727,6 +777,7 @@ def parse_fontfix_output(text):
     return {
         "replacements": replacements,
         "still_missing": still,
+        "shape_gaps": shapes,
         "summary": summary,
         "errors": errors,
         "ready": ready,
@@ -747,7 +798,26 @@ def still_text(rows):
     return " || ".join(format_still(row["style"], row["primary"], row["big"]) for row in rows)
 
 
-CSV_FIELDS = ["檔案", "輸出", "狀態", "替換樣式數", "替換明細", "仍缺字", "錯誤", "秒數"]
+def shape_text(rows):
+    """One cell: ``形狀檔未處理: file (handle=..., name=...) || ...``."""
+    parts = []
+    for row in rows:
+        label = row.get("file") or ""
+        extra = []
+        if row.get("handle"):
+            extra.append(f"handle={row['handle']}")
+        if row.get("name"):
+            extra.append(f"name={row['name']}")
+        if extra:
+            label += " (" + ", ".join(extra) + ")"
+        if label:
+            parts.append(label)
+    if not parts:
+        return ""
+    return "形狀檔未處理: " + " || ".join(parts)
+
+
+CSV_FIELDS = ["檔案", "輸出", "狀態", "替換樣式數", "替換明細", "仍缺字", "形狀檔未處理", "錯誤", "秒數"]
 STATUS_TEXT = {
     "SAVED": "已輸出",
     "FAILED": "失敗",
@@ -764,6 +834,7 @@ def csv_row(rec):
         "替換樣式數": rec.get("styles_replaced", 0),
         "替換明細": rec.get("replacements", ""),
         "仍缺字": rec.get("still_missing", ""),
+        "形狀檔未處理": rec.get("shape_gaps", ""),
         "錯誤": rec.get("error", ""),
         "秒數": rec.get("elapsed_seconds", 0),
     }

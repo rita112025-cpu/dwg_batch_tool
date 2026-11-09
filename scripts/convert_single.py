@@ -33,6 +33,27 @@ def sha256(p, n=1 << 20):
     return h.hexdigest()
 
 
+def copy_hashed(src, dest, n=1 << 20):
+    """Copy ``src`` to ``dest`` and return the SHA-256 of the bytes read.
+
+    The digest is computed from the same read that writes the copy, so callers
+    do not have to scan the source twice before processing starts. A failed
+    copy removes the partial destination.
+    """
+    dest = Path(dest)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    digest = hashlib.sha256()
+    try:
+        with open(src, "rb") as src_fh, open(dest, "wb") as dest_fh:
+            while chunk := src_fh.read(n):
+                digest.update(chunk)
+                dest_fh.write(chunk)
+    except OSError:
+        dest.unlink(missing_ok=True)
+        raise
+    return digest.hexdigest()
+
+
 def validate_dxf(path):
     """Return (status, detail). Never trust the AutoCAD return code alone."""
     p = Path(path)

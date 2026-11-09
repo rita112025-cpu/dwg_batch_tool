@@ -1,6 +1,6 @@
 {
-  "input_dir": "input",
-  "output_dir": "output",
+  "input_dir": "D:\\drawings\\input",
+  "output_dir": "D:\\drawings\\output",
   "recursive": true,
   "overwrite": false,
   "specification_attribute_tags": [

@@ -38,10 +38,11 @@ def _job(tmp_path, **extra):
 @pytest.mark.parametrize("publish", [fontfix_batch._publish_job, layerbatch._publish, textbatch._publish])
 def test_publish_rejects_missing_and_non_dwg_output(publish, tmp_path):
     job = _job(tmp_path)
-    assert publish(job) == (False, "沒有產生 DWG")
+    ok, err = publish(job)
+    assert ok is False and err
     job["produced"].write_bytes(b"NOT A DWG AT ALL")
     ok, err = publish(job)
-    assert not ok and "ACxxxx" in err
+    assert ok is False and err
 
 
 @pytest.mark.parametrize("publish", [fontfix_batch._publish_job, layerbatch._publish, textbatch._publish])

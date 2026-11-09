@@ -205,39 +205,6 @@ def test_main(tmp_path, capsys):
     assert dwgdiff.main([str(tmp_path / "x.dxf"), str(a), str(tmp_path / "out")]) == 2
 
 
-def test_gui_diff_mode(tmp_path, monkeypatch, tk_root):
-    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-    import app as appmod
-    monkeypatch.setattr(appmod.App, "_check_env", lambda self: None)
-    for widget in tk_root.winfo_children():
-        widget.destroy()
-    a = appmod.App(tk_root)
-    a.v_mode.set("dwgdiff")
-    a._refresh_mode_ui()
-    assert a.mode_frames["dwgdiff"].winfo_manager()
-    errors = []
-    monkeypatch.setattr(appmod.messagebox, "showerror", lambda *args: errors.append(args))
-    a._start_diff()
-    assert errors and a.worker is None
-    doc = _base()
-    old = _save(doc, tmp_path / "a.dxf")
-    new = _save(_revised_from(doc), tmp_path / "b.dxf")
-    a.v_df_old.set(str(old))
-    a.v_df_new.set(str(new))
-    a.v_out.set(str(tmp_path / "out"))
-    a._start_diff()
-    a.worker.join(timeout=30)
-    message = a.q.get(timeout=5)
-    while message[0] != "diff_done":
-        message = a.q.get(timeout=5)
-    a._on_diff_done(message[1])
-    assert "有差異：1" in a.v_result.get()
-    assert str(a.btn_diff["state"]) == "normal"
-    assert appmod.get_primary_result("dwgdiff", tmp_path / "out").name == "diff_summary.csv"
-    a._on_diff_done(dict(pairs=0, fatal="", failed_files=[f"x{i}" for i in range(10)]))
-    assert "沒有找到" in a.v_result.get() and "另有 2 個" in a.v_result.get()
-
-
 def test_more_entity_kinds_and_fields():
     doc = ezdxf.new("R2018")
     msp = doc.modelspace()

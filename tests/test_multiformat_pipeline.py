@@ -80,7 +80,7 @@ def test_gui_analysis_smoke(tmp_path, engineering_cfg, monkeypatch, tk_root):
         assert all(str(b['state']) == 'disabled' for b in a.analysis_outputs.values())
         a._start_analysis()
         deadline = time.time() + 20
-        while a.summary is None and time.time() < deadline:
+        while (a.summary is None or a._busy() or a._batch is not None) and time.time() < deadline:
             root.update(); time.sleep(.02)
         assert a.summary and a.summary['ok'] == 1
         assert str(a.analysis_outputs['database/project.db']['state']) == 'normal'

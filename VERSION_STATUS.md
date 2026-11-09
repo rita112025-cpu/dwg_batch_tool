@@ -35,7 +35,7 @@ Allowed (controlled, bounded, reversible):
 - Cable Tray Designer bridge feasibility testing (no formal integration)
 - Regression tests / validation tooling
 - Bug fixes and evidence-quality improvements
-- DWG batch-tool upgrade (2026-10, user-approved): DWG revision diff, title-block attribute batch read/write, layer standard check report, parallel accoreconsole execution (`workers`), test coverage work
+- DWG batch-tool upgrade (2026-10, user-approved; backend only, GUI wiring pending in a separate PR): DWG revision diff, title-block attribute batch read/write, layer standard check report, parallel accoreconsole execution (`workers`), test coverage work
 
 Still frozen:
 

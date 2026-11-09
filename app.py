@@ -11,6 +11,8 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, scrolledtext, ttk
 
 ROOT = Path(__file__).resolve().parent
+# ezdxf's compiled .pyd accelerators are unsigned and Windows App Control blocks them; use pure Python.
+os.environ.setdefault("EZDXF_DISABLE_C_EXT", "1")
 sys.path.insert(0, str(ROOT / "scripts"))
 import common  # noqa: E402
 import env_check  # noqa: E402
@@ -18,15 +20,11 @@ import pipeline  # noqa: E402
 import dwg_version  # noqa: E402
 import fontfix  # noqa: E402
 import fontfix_batch  # noqa: E402
+import proxybatch  # noqa: E402
 import dwgtext  # noqa: E402
 import textbatch  # noqa: E402
 import layerclass  # noqa: E402
 import layerbatch  # noqa: E402
-import parallel  # noqa: E402
-import dwgdiff  # noqa: E402
-import titleblock  # noqa: E402
-import titleblock_batch  # noqa: E402
-import layerstd  # noqa: E402
 
 try:  # crisp text on high-DPI Windows displays
     import ctypes
@@ -60,15 +58,47 @@ LOG_FG = {"success": "#1B6E2C", "warning": "#8A5A00", "failed": "#B3261E"}      
 PRIMARY_RESULTS = {
     "version": ("csv/dwg_versions.csv",),
     "fontfix": ("logs/fontfix_results.csv",),
+    "proxygraphics": ("logs/proxygraphics_results.csv",),
     "textextract": ("logs/textextract_hits.csv",),
     "textreplace": ("logs/textreplace_changes.csv",),
     "layerclass": ("logs/layerclass_moves.csv",),
-    "layerstd": ("layer_check/layer_check_report.html",),
-    "dwgdiff": ("dwgdiff/diff_summary.csv",),
-    "titleblock": ("logs/titleblock_results.csv", "titleblock_attrs.csv"),
     "dwg": ("csv/scada_hits.csv", "csv/file_index.csv"),
     "analysis": ("cross_reference/cross_reference.csv", "database/project.db"),
 }
+
+
+# ---------- selectable jobs ----------
+# One entry per task. The order here is the order the checkboxes appear in and the order a batch runs.
+TASKS = (
+    ("scan", "掃描資料夾"),
+    ("version", "DWG / DWT 版本表"),
+    ("fontfix", "缺字體修復"),
+    ("proxygraphics", "Revit 代理圖形"),
+    ("layerclass", "自動分圖層"),
+    ("textextract", "文字擷取"),
+    ("textreplace", "文字取代"),
+    ("dwg", "DWG 轉 DXF + 解析"),
+    ("analysis", "工程資料分析"),
+)
+TASK_LABELS = dict(TASKS)
+NUMBERS = "①②③④⑤⑥⑦⑧⑨"
+# Jobs that call accoreconsole; the shared start button stays usable without AutoCAD for the others.
+NEEDS_ACCORE = frozenset({"fontfix", "proxygraphics", "layerclass", "textextract", "textreplace", "dwg"})
+SEVERITY = {"success": 0, "skipped": 1, "warning": 2, "failed": 3}
+
+
+class TaskError(Exception):
+    """A task cannot start: title + the Traditional Chinese reason shown to the user."""
+
+    def __init__(self, title, message):
+        super().__init__(message)
+        self.title = title
+        self.message = message
+
+
+def job_number(index):
+    """①..⑨ for batch rows; plain digits if a batch ever grows past nine tasks."""
+    return NUMBERS[index - 1] if 0 < index <= len(NUMBERS) else str(index)
 
 
 def get_primary_result(mode, output_dir):
@@ -169,15 +199,40 @@ class App:
         self.env_ok = False
         self.summary = None
         self.analysis_inputs = []
+        # Multi-select: one BooleanVar per task. v_mode stays as the "most recently checked task" and
+        # keeps single-selection callers (and tests) working when they set it programmatically.
+        self.v_modes = {key: tk.BooleanVar(value=key == "version") for key, _label in TASKS}
         self.v_mode = tk.StringVar(value="version")
+        self._mode_synced = "version"
+        self._batch = None
+        self._batch_out = ""
+        self._preparers = {
+            "scan": self._prepare_scan, "version": self._prepare_versions,
+            "fontfix": self._prepare_fontfix, "proxygraphics": self._prepare_proxygraphics,
+            "layerclass": self._prepare_layerclass, "textextract": self._prepare_extract,
+            "textreplace": self._prepare_replace, "dwg": self._prepare_dwg,
+            "analysis": self._prepare_analysis,
+        }
+        self._runners = {
+            "scan": self._run_scan, "version": self._run_versions,
+            "fontfix": self._run_fontfix, "proxygraphics": self._run_proxygraphics,
+            "layerclass": self._run_layerclass, "textextract": self._run_extract,
+            "textreplace": self._run_replace, "dwg": self._run_dwg,
+            "analysis": self._run_analysis,
+        }
+        self._renderers = {
+            "scan": self._render_scan, "version": self._render_versions,
+            "fontfix": self._render_fontfix, "proxygraphics": self._render_proxygraphics,
+            "layerclass": self._render_layerclass, "textextract": self._render_extract,
+            "textreplace": self._render_replace, "dwg": self._render_dwg,
+            "analysis": self._render_analysis,
+        }
 
         self.v_in = tk.StringVar(value=str(common.resolve(self.cfg, "input_dir")))
         self.v_out = tk.StringVar(value=str(common.resolve(self.cfg, "output_dir")))
         self.opts = {k: tk.BooleanVar(value=v) for k, v in dict(
             recursive=self.cfg.get("recursive", True), convert=True, analyze=True, scada=True,
             csv=True, json=True, overwrite=self.cfg.get("overwrite", False)).items()}
-        self.v_workers = tk.IntVar(value=parallel.clamp_workers(
-            self.cfg.get("workers", parallel.default_workers())))
         self.v_progress = tk.DoubleVar(value=0)
         self.v_ptext = tk.StringVar(value="")
         self.v_current = tk.StringVar(value="")
@@ -243,38 +298,42 @@ class App:
             button = ttk.Button(paths, text="瀏覽", command=lambda v=var: self._browse(v))
             button.grid(row=r, column=2, padx=4)
             self.browse_buttons.append(button)
-        ttk.Label(paths, text="同時處理數", width=12).grid(row=2, column=0, sticky="w", pady=3)
-        workers_row = ttk.Frame(paths)
-        workers_row.grid(row=2, column=1, columnspan=2, sticky="w", padx=4)
-        self.spin_workers = ttk.Spinbox(workers_row, from_=1, to=parallel.MAX_WORKERS, width=4,
-                                        textvariable=self.v_workers)
-        self.spin_workers.pack(side="left")
-        ttk.Label(workers_row, text="個 accoreconsole 同時執行（越多越快，也越耗記憶體）").pack(side="left", padx=6)
         paths.columnconfigure(1, weight=1)
 
-        # ---- 2 我要做什麼 ----
-        selector = ttk.LabelFrame(main, text="② 我要做什麼？")
+        # ---- 2 我要做什麼（可多選） ----
+        selector = ttk.LabelFrame(main, text="② 我要做什麼？（可多選）")
         selector.pack(fill="x", **pad)
-        radio_row = ttk.Frame(selector)
-        radio_row.pack(fill="x", padx=6, pady=6)
+        mode_row = ttk.Frame(selector)
+        mode_row.pack(fill="x", padx=6, pady=6)
         self.mode_buttons = []
-        modes = (("scan", "掃描資料夾"), ("version", "DWG / DWT 版本表"), ("fontfix", "缺字體修復"),
-                 ("layerclass", "自動分圖層"), ("layerstd", "圖層標準檢查"),
-                 ("textextract", "文字擷取"), ("textreplace", "文字取代"), ("titleblock", "圖框屬性"),
-                 ("dwg", "DWG 轉 DXF + 解析"), ("analysis", "工程資料分析"),
-                 ("dwgdiff", "差異比對"))
-        for i, (value, text) in enumerate(modes):
-            radio = ttk.Radiobutton(radio_row, text=text, value=value, variable=self.v_mode,
-                                    command=self._refresh_mode_ui)
-            radio.grid(row=i // 3, column=i % 3, sticky="w", padx=(0, 18), pady=2)
-            self.mode_buttons.append(radio)
+        for i, (value, text) in enumerate(TASKS):
+            button = ttk.Checkbutton(mode_row, text=text, variable=self.v_modes[value],
+                                     command=lambda key=value: self._on_mode_toggle(key))
+            button.grid(row=i // 3, column=i % 3, sticky="w", padx=(0, 18), pady=2)
+            self.mode_buttons.append(button)
+        quick_row = ttk.Frame(selector)
+        quick_row.pack(fill="x", padx=6, pady=(0, 2))
+        self.btn_select_all = ttk.Button(quick_row, text="全選", width=8, command=self._select_all_modes)
+        self.btn_select_all.pack(side="left")
+        self.btn_clear_all = ttk.Button(quick_row, text="全不選", width=8, command=self._clear_all_modes)
+        self.btn_clear_all.pack(side="left", padx=(6, 0))
+        run_row = ttk.Frame(selector)
+        run_row.pack(fill="x", padx=6, pady=(0, 6))
+        self.btn_run_selected = ttk.Button(run_row, text="開始所選任務", command=self._start_selected)
+        self.btn_run_selected.pack(side="left")
+        self.lbl_selection = ttk.Label(run_row, text="", justify="left", wraplength=700)
+        self.lbl_selection.pack(side="left", padx=(8, 0))
+        self._wrap_to_width(self.lbl_selection, run_row, margin=220)
 
-        # ---- 3 本工作設定 ----
-        mode_box = ttk.LabelFrame(main, text="③ 本工作設定")
+        # ---- 3 任務設定（勾選幾項就顯示幾項） ----
+        mode_box = ttk.LabelFrame(main, text="③ 任務設定（顯示所有已勾選的任務）")
         mode_box.pack(fill="x", **pad)
         self.mode_frame = ttk.Frame(mode_box)
         self.mode_frame.pack(fill="x", padx=6, pady=6)
         self.mode_frames = {}
+        self.mode_empty = ttk.Frame(self.mode_frame)
+        ttk.Label(self.mode_empty, text="請在②勾選至少一項任務。",
+                  justify="left").pack(anchor="w")
 
         scan = ttk.Frame(self.mode_frame)
         self.mode_frames["scan"] = scan
@@ -344,15 +403,15 @@ class App:
                   font=(tkfont.nametofont("TkDefaultFont").actual("family"), 11)).pack(anchor="w")
         ttk.Label(
             fontfix_box,
-            text=("使用上方的輸入資料夾與輸出資料夾。每個 DWG 會複製到輸出資料夾，"
+            text=("使用上方的輸入資料夾與輸出資料夾。每個 DWG 與 DWT 會複製到輸出資料夾，"
                   "只替換找不到的文字樣式字體；已安裝的字體與 @ 開頭的直排字體保持原樣。\n"
-                  "不會修改原始圖檔。正在 AutoCAD 中開啟的圖也會先複製再處理。"),
+                  "不會修改原始圖檔，修復後的樣板仍是 .dwt。正在 AutoCAD 中開啟的圖也會先複製再處理。"),
             justify="left", wraplength=760,
         ).pack(anchor="w", pady=(2, 6))
         ttk.Checkbutton(fontfix_box, text="包含子資料夾（輸出保留相同的資料夾結構）",
                         variable=self.opts["recursive"]).pack(anchor="w")
         self.v_ff_overwrite = tk.BooleanVar(value=False)
-        ttk.Checkbutton(fontfix_box, text="覆寫既有的輸出 DWG",
+        ttk.Checkbutton(fontfix_box, text="覆寫既有的輸出 DWG / DWT",
                         variable=self.v_ff_overwrite).pack(anchor="w")
         form = ttk.Frame(fontfix_box)
         form.pack(fill="x", pady=(6, 0))
@@ -376,6 +435,32 @@ class App:
         self.ff_map_text.bind("<Shift-Tab>", lambda e: (e.widget.tk_focusPrev().focus_set(), "break")[1])
         self.btn_fontfix = ttk.Button(fontfix_box, text="開始修復字體", command=self._start_fontfix)
         self.btn_fontfix.pack(anchor="w", pady=(4, 0))
+
+        proxy_box = ttk.Frame(self.mode_frame)
+        self.mode_frames["proxygraphics"] = proxy_box
+        ttk.Label(
+            proxy_box,
+            text="Revit 代理圖形（PROXYGRAPHICS=1）",
+            font=(tkfont.nametofont("TkDefaultFont").actual("family"), 11),
+        ).pack(anchor="w")
+        ttk.Label(
+            proxy_box,
+            text=("每個 DWG 都先複製到暫存檔，再以 AutoCAD 設定 PROXYGRAPHICS=1 並存檔。\n"
+                  "完成檔寫入輸出資料夾，原始 DWG 不會被修改；不會 EXPLODE 物件。"),
+            justify="left",
+            wraplength=760,
+        ).pack(anchor="w", pady=(2, 6))
+        ttk.Checkbutton(
+            proxy_box, text="包含子資料夾", variable=self.opts["recursive"]
+        ).pack(anchor="w")
+        self.v_pg_overwrite = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            proxy_box, text="覆寫既有的輸出 DWG", variable=self.v_pg_overwrite
+        ).pack(anchor="w")
+        self.btn_proxygraphics = ttk.Button(
+            proxy_box, text="開始設定代理圖形", command=self._start_proxygraphics
+        )
+        self.btn_proxygraphics.pack(anchor="w", pady=(8, 0))
 
         extract = ttk.Frame(self.mode_frame)
         self.mode_frames["textextract"] = extract
@@ -455,8 +540,6 @@ class App:
         self.btn_replace = ttk.Button(replace, text="開始取代文字", command=self._start_replace)
         self.btn_replace.pack(anchor="w", pady=(8, 0))
 
-        self._build_titleblock()
-
         layer_box = ttk.Frame(self.mode_frame)
         self.mode_frames["layerclass"] = layer_box
         ttk.Label(layer_box, text="自動分圖層",
@@ -519,35 +602,6 @@ class App:
         self.btn_layer = ttk.Button(layer_box, text="開始分圖層", command=self._start_layerclass)
         self.btn_layer.pack(anchor="w", pady=(6, 0))
 
-        self._build_diff_frame()
-
-        std_box = ttk.Frame(self.mode_frame)
-        self.mode_frames["layerstd"] = std_box
-        ttk.Label(std_box, text="圖層標準檢查",
-                  font=(tkfont.nametofont("TkDefaultFont").actual("family"), 11)).pack(anchor="w")
-        ttk.Label(
-            std_box,
-            text=("依圖層標準檔（CSV 或 JSON）檢查每張圖的圖層名稱、顏色、線型、線寬、列印設定、"
-                  "圖層 0 上的圖元、空圖層與必要圖層。\n"
-                  "DXF 直接讀取；DWG 先用 accoreconsole 轉成 DXF。原始圖檔不會被改寫。"
-                  "範例標準檔：samples\\layer_standard.csv"),
-            justify="left", wraplength=760,
-        ).pack(anchor="w", pady=(2, 6))
-        std_form = ttk.Frame(std_box)
-        std_form.pack(fill="x")
-        self.v_ls_standard = tk.StringVar(value=str(ROOT / "samples" / "layer_standard.csv"))
-        ttk.Label(std_form, text="圖層標準檔", width=14).grid(row=0, column=0, sticky="w", pady=2)
-        ttk.Entry(std_form, textvariable=self.v_ls_standard).grid(row=0, column=1, sticky="ew", pady=2)
-        self.btn_ls_browse = ttk.Button(std_form, text="瀏覽", command=self._browse_layer_standard)
-        self.btn_ls_browse.grid(row=0, column=2, padx=4)
-        std_form.columnconfigure(1, weight=1)
-        self.v_ls_overwrite = tk.BooleanVar(value=False)
-        ttk.Checkbutton(std_box, text="包含子資料夾", variable=self.opts["recursive"]).pack(anchor="w")
-        ttk.Checkbutton(std_box, text="重新轉換已存在的 DXF（layer_check\\dxf）",
-                        variable=self.v_ls_overwrite).pack(anchor="w")
-        self.btn_layerstd = ttk.Button(std_box, text="開始檢查圖層", command=self._start_layerstd)
-        self.btn_layerstd.pack(anchor="w", pady=(6, 0))
-
         # ---- 4 執行狀態 ----
         st = ttk.LabelFrame(main, text="④ 執行狀態")
         st.pack(fill="both", expand=True, **pad)
@@ -608,18 +662,9 @@ class App:
             ("文字取代", (("開啟 textreplace_changes.csv", "logs/textreplace_changes.csv"),
                       ("開啟 textreplace_results.csv", "logs/textreplace_results.csv"),
                       ("開啟 textreplace.log", "logs/textreplace.log"))),
-            ("圖框屬性", (("開啟 titleblock_attrs.csv", "titleblock_attrs.csv"),
-                      ("開啟 titleblock_results.csv", "logs/titleblock_results.csv"),
-                      ("開啟 titleblock.log", "logs/titleblock.log"))),
             ("自動分圖層", (("開啟 layerclass_moves.csv", "logs/layerclass_moves.csv"),
                        ("開啟 layerclass_results.csv", "logs/layerclass_results.csv"),
                        ("開啟 layerclass.log", "logs/layerclass.log"))),
-            ("差異比對", (("開啟 diff_summary.csv", "dwgdiff/diff_summary.csv"),
-                      ("開啟 diff_details.csv", "dwgdiff/diff_details.csv"),
-                      ("開啟 diff_report.json", "dwgdiff/diff_report.json"))),
-            ("圖層標準檢查", (("開啟 layer_check_report.html", "layer_check/layer_check_report.html"),
-                        ("開啟 layer_check_summary.csv", "layer_check/layer_check_summary.csv"),
-                        ("開啟 layer_check_details.csv", "layer_check/layer_check_details.csv"))),
             ("DWG 結果", (("開啟 scada_hits.csv", "csv/scada_hits.csv"), ("開啟 object_hits.csv", "csv/object_hits.csv"),
                          ("開啟 file_index.csv", "csv/file_index.csv"))),
             ("工程分析結果", (("開啟 project.db", "database/project.db"),
@@ -713,36 +758,104 @@ class App:
             self.more_results.pack(fill="x", after=self.more_toggle)
             self.more_toggle.configure(text="更多結果 ▾")
 
+    def _selected_modes(self):
+        """Task keys in UI order (the same order a batch runs them)."""
+        return [key for key, _label in TASKS if self.v_modes[key].get()]
+
+    def _on_mode_toggle(self, key):
+        """A task checkbox changed: remember the most recently checked task for single-task callers."""
+        if self.v_modes[key].get():
+            self.v_mode.set(key)
+        else:
+            selected = self._selected_modes()
+            if selected:
+                self.v_mode.set(selected[-1])
+        self._mode_synced = self.v_mode.get()
+        self._refresh_mode_ui()
+
+    def _set_all_modes(self, checked):
+        """Tick or untick every task at once; the shared start button and ③ follow immediately."""
+        for var in self.v_modes.values():
+            var.set(checked)
+        selected = self._selected_modes()
+        if selected:
+            self.v_mode.set(selected[-1])   # keep the single-task compatibility variable on a real task
+        self._mode_synced = self.v_mode.get()
+        self._refresh_mode_ui()
+
+    def _select_all_modes(self):
+        self._set_all_modes(True)
+
+    def _clear_all_modes(self):
+        self._set_all_modes(False)
+
     def _refresh_mode_ui(self):
-        """Show only the selected job settings without changing any saved/user-entered values."""
+        """Show the settings of every checked task without changing any saved/user-entered values.
+
+        Setting ``v_mode`` programmatically (older callers) still selects exactly that one task.
+        """
+        current = self.v_mode.get()
+        if current in self.v_modes and current != self._mode_synced:
+            for key, var in self.v_modes.items():
+                var.set(key == current)
+            self._mode_synced = current
+        selected = self._selected_modes()
         for frame in self.mode_frames.values():
             frame.pack_forget()
-        self.mode_frames[self.v_mode.get()].pack(fill="x")
+        self.mode_empty.pack_forget()
+        if selected:
+            for key in selected:
+                self.mode_frames[key].pack(fill="x")
+        else:
+            self.mode_empty.pack(fill="x")
+        self._refresh_selection_ui()
         self._set_busy_ui(self._busy())
         self._refresh_analysis_outputs()
+
+    def _refresh_selection_ui(self):
+        selected = self._selected_modes()
+        count = len(selected)
+        self.btn_run_selected.configure(text=f"開始所選任務（{count}）" if count else "開始所選任務")
+        if not count:
+            self.lbl_selection.configure(text="請至少勾選一項任務。")
+        elif count == 1:
+            self.lbl_selection.configure(text=f"將執行：{TASK_LABELS[selected[0]]}")
+        else:
+            self.lbl_selection.configure(
+                text=f"已勾選 {count} 項，將依序執行：" + "、".join(TASK_LABELS[k] for k in selected))
 
     def _set_busy_ui(self, busy):
         """Centralised enable/disable policy for all job controls."""
         state = "disabled" if busy else "normal"
         for widget in (self.mode_buttons + self.browse_buttons +
-                       [self.btn_scan, self.btn_versions, self.btn_analysis, self.btn_fontfix,
+                       [self.btn_select_all, self.btn_clear_all,
+                        self.btn_scan, self.btn_versions, self.btn_analysis, self.btn_fontfix,
+                        self.btn_proxygraphics,
                         self.btn_extract, self.btn_replace, self.btn_layer,
-                        self.btn_layerstd, self.btn_ls_browse,
-                        self.btn_files, self.btn_folder, self.btn_recheck, self.btn_save_config,
-                        self.spin_workers]):
+                        self.btn_files, self.btn_folder, self.btn_recheck, self.btn_save_config]):
             widget.configure(state=state)
         self.btn_start.configure(state="normal" if not busy and self.env_ok else "disabled")
         self.btn_fontfix.configure(state="normal" if not busy and self.env_ok else "disabled")
+        self.btn_proxygraphics.configure(state="normal" if not busy and self.env_ok else "disabled")
         self.btn_extract.configure(state="normal" if not busy and self.env_ok else "disabled")
         self.btn_replace.configure(state="normal" if not busy and self.env_ok else "disabled")
         self.btn_layer.configure(state="normal" if not busy and self.env_ok else "disabled")
-        self._tb_set_busy(busy)
+        selected = self._selected_modes()
+        accore_needed = any(key in NEEDS_ACCORE for key in selected)
+        self.btn_run_selected.configure(
+            state="normal" if selected and not busy and (self.env_ok or not accore_needed) else "disabled")
         cancellable = busy and self._can_stop
         self.btn_stop.configure(state="normal" if cancellable else "disabled")
         self._refresh_analysis_outputs()
 
     def _get_primary_result(self):
-        return get_primary_result(self.v_mode.get(), self.v_out.get().strip())
+        """Newest checked task first: one button still works when several tasks share an output folder."""
+        out = self.v_out.get().strip()
+        for key in reversed(self._selected_modes()):
+            target = get_primary_result(key, out)
+            if target is not None:
+                return target
+        return None
 
     def _open_primary(self):
         target = self._get_primary_result()
@@ -771,52 +884,7 @@ class App:
         self.btn_primary.configure(state="normal" if primary is not None and not self._busy() else "disabled")
 
     def _start_analysis(self):
-        if self._busy(): return
-        cfg = self._current_cfg()
-        cfg['recursive'] = self.opts['recursive'].get()
-        inputs = self.analysis_inputs or [cfg['input_dir']]
-        if not cfg['output_dir'] or any(not Path(p).exists() for p in inputs):
-            messagebox.showerror("路徑錯誤", "請選擇存在的輸入檔案／資料夾，並指定輸出資料夾。")
-            return
-        self.stop_event.clear()
-        self._can_stop = True
-        self.summary = None
-        self.v_result.set("分析中...")
-        self._set_status("running", "分析工程資料中…")
-        self.v_progress.set(0)
-        self.v_ptext.set("")
-        self.v_current.set("")
-        def work():
-            try:
-                result = pipeline.run_pipeline(cfg, dict(multiformat=True, inputs=inputs),
-                    log=lambda lv, msg: self.q.put(('log', lv, msg)),
-                    progress=lambda *args: self.q.put(('progress', *args)), stop_event=self.stop_event)
-                self.q.put(('analysis_done', result))
-            except Exception as exc:
-                common.log_error(cfg, f'multiformat: {type(exc).__name__}: {exc}')
-                self.q.put(('analysis_done', dict(fatal=str(exc), total=0, ok=0, failed=0, warnings=0, stopped=False)))
-        self.worker = threading.Thread(target=work, daemon=True)
-        self.worker.start()
-        self._set_busy_ui(True)
-
-    def _analysis_done(self, result):
-        self.summary = result
-        self.worker = None
-        self._can_stop = False
-        self._set_busy_ui(False)
-        state, verdict = classify_outcome(result)
-        st = STATE[state]
-        failed_files = result.get('failed_files', [])
-        shown = "\n".join(f"  - {friendly_failure(x)}" for x in failed_files[:8])
-        if len(failed_files) > 8:
-            shown += f"\n  ... 另有 {len(failed_files) - 8} 個（見 errors.log）"
-        self.v_result.set(f"{st['symbol']} {st['label']}：{verdict}\n"
-                          f"檔案：{result['total']}　成功：{result['ok']}　失敗：{result['failed']}　"
-                          f"略過：{result.get('skipped', 0)}　警告：{result['warnings']}\n" + result['fatal']
-                          + (f"\n\n失敗檔案：\n{shown}" if failed_files else ""))
-        self._set_status(state, verdict)
-        self.v_progress.set(100 if not result['stopped'] else self.v_progress.get())
-        self._reveal(self.result_frame)
+        self._start_tasks(["analysis"])
 
     def _browse(self, var):
         d = filedialog.askdirectory(initialdir=var.get() or str(ROOT))
@@ -826,21 +894,15 @@ class App:
     def _keywords(self):
         return [l.strip() for l in self.kw_text.get("1.0", "end").splitlines() if l.strip()]
 
-    def _workers(self):
-        try:
-            return parallel.clamp_workers(self.v_workers.get())
-        except tk.TclError:  # non-numeric text in the spinbox
-            return 1
-
     def _current_cfg(self):
         return dict(self.cfg, input_dir=self.v_in.get().strip(), output_dir=self.v_out.get().strip(),
-                    keywords=self._keywords(), workers=self._workers())
+                    keywords=self._keywords())
 
     def _save_config(self):
         cfg = {k: v for k, v in self.cfg.items() if not k.startswith("_")}
         cfg.update(input_dir=self.v_in.get().strip(), output_dir=self.v_out.get().strip(),
                    keywords=self._keywords(), recursive=self.opts["recursive"].get(),
-                   overwrite=self.opts["overwrite"].get(), workers=self._workers())
+                   overwrite=self.opts["overwrite"].get())
         try:
             (ROOT / "config.json").write_text(json.dumps(cfg, ensure_ascii=False, indent=2),
                                               encoding="utf-8")
@@ -942,69 +1004,10 @@ class App:
         self._set_busy_ui(self._busy())
         self.v_accore.set(f"accoreconsole 路徑：{r['accore'] or '未設定'}")
 
-    # ---------- scan ----------
-    def _scan_versions(self):
-        """Read ACxxxx headers from DWG/DWT and export a version inventory CSV."""
-        if self._busy():
-            return
-        input_dir = Path(self.v_in.get().strip())
-        output_dir = Path(self.v_out.get().strip())
-        if not input_dir.is_dir():
-            messagebox.showerror("輸入資料夾不存在", str(input_dir))
-            return
-        if not str(output_dir).strip():
-            messagebox.showerror("請指定輸出資料夾", "")
-            return
-
-        csv_path = output_dir / "csv" / "dwg_versions.csv"
-        recursive = self.opts["recursive"].get()
-        self._can_stop = False
-        self.v_scan.set("讀取 DWG/DWT 版本中...")
-        self.v_result.set("處理中...")
-        self._set_status("running", "讀取 DWG / DWT 版本中…")
-        self.v_progress.set(0)
-        self.v_ptext.set("")
-        self.v_current.set("")
-
-        def work():
-            try:
-                rows = dwg_version.write_version_csv([input_dir], csv_path, recursive=recursive)
-                ok = sum(r["status"] == "OK" for r in rows)
-                unknown = sum(r["status"] == "UNKNOWN_CODE" for r in rows)
-                invalid = len(rows) - ok - unknown
-                dwt = sum(r["extension"] == ".dwt" for r in rows)
-                self.q.put(("versions_done", str(csv_path), len(rows), ok, unknown, invalid, dwt))
-            except Exception as exc:  # noqa: BLE001
-                self.q.put(("versions_err", str(exc)))
-
-        self.worker = threading.Thread(target=work, daemon=True)
-        self.worker.start()
-        self._set_busy_ui(True)
-
-    def _scan(self):
-        if self._busy():
-            return
-        d = self.v_in.get().strip()
-        rec = self.opts["recursive"].get()
-        self._can_stop = False
-        if not Path(d).is_dir():
-            messagebox.showerror("輸入資料夾不存在", d)
-            return
-
-        def work():
-            try:
-                self.q.put(("scan", pipeline.scan(d, rec)))
-            except Exception as e:  # noqa: BLE001
-                self.q.put(("scan_err", str(e)))
-        self.v_scan.set("掃描中...")
-        self.v_result.set("處理中...")
-        self._set_status("running", "掃描資料夾中…")
-        self.v_progress.set(0)
-        self.v_ptext.set("")
-        self.v_current.set("")
-        self.worker = threading.Thread(target=work, daemon=True)
-        self.worker.start()
-        self._set_busy_ui(True)
+    # ---------- task settings: validate -> run -> render ----------
+    def _require_accore(self, action):
+        if not self.env_ok:
+            raise TaskError(f"無法{action}", "找不到可用的 accoreconsole；請先完成環境設定並重新檢查。")
 
     def _fontfix_version(self):
         label = self.ff_version_box.get()
@@ -1012,94 +1015,6 @@ class App:
             if text == label:
                 return code
         return None
-
-    def _start_fontfix(self):
-        if self._busy():
-            return
-        if not self.env_ok:
-            messagebox.showerror("無法修復字體", "找不到可用的 accoreconsole；請先完成環境設定並重新檢查。")
-            return
-        src = self.v_in.get().strip()
-        dst = self.v_out.get().strip()
-        problem = fontfix.directory_problem(src, dst)
-        if problem:
-            messagebox.showerror("路徑錯誤", problem)
-            return
-        version = self._fontfix_version()
-        if version is None:
-            messagebox.showerror("版本錯誤", "不支援的 DWG 版本。")
-            return
-        primary = self.v_ff_primary.get().strip() or fontfix.DEFAULT_PRIMARY
-        big = self.v_ff_big.get().strip() or fontfix.DEFAULT_BIG
-        mapping = fontfix.parse_mapping(self.ff_map_text.get("1.0", "end"))
-        recursive = self.opts["recursive"].get()
-        overwrite = self.v_ff_overwrite.get()
-        timeout = int(self.cfg.get("timeout_seconds", 300))
-        workers = self._workers()
-        accore = self.cfg.get("accoreconsole", "")
-        self.stop_event.clear()
-        self._can_stop = True
-        self.summary = None
-        self.v_progress.set(0)
-        self.v_ptext.set("")
-        self.v_current.set("")
-        self.v_result.set("修復字體中...")
-        self._set_status("running", "缺字體修復中…")
-
-        def work():
-            try:
-                result = fontfix_batch.run(
-                    src, dst, accore, recursive=recursive, primary=primary, big=big,
-                    mapping=mapping, version=version, overwrite=overwrite, timeout=timeout, workers=workers,
-                    stop_event=self.stop_event,
-                    progress=lambda i, n, cur: self.q.put(("progress", "缺字體修復", i, n, cur)),
-                    log=lambda level, message: self.q.put(("log", level, message)),
-                )
-            except Exception as exc:  # noqa: BLE001
-                result = dict(dwg=0, ok=0, failed=0, skipped=0, warnings=0, styles_replaced=0,
-                              stopped=False, fatal=f"{type(exc).__name__}: {exc}",
-                              failed_files=[], still_files=[], elapsed=0)
-                common.log_error({"output_dir": dst}, f"fontfix crashed: {result['fatal']}")
-            self.q.put(("fontfix_done", result))
-
-        self.worker = threading.Thread(target=work, daemon=True)
-        self.worker.start()
-        self._set_busy_ui(True)
-
-    def _on_fontfix_done(self, result):
-        self.summary = result
-        self.worker = None
-        self._can_stop = False
-        self._set_busy_ui(False)
-        if result.get("dwg", 0) == 0 and not result.get("fatal") and not result.get("stopped"):
-            state, verdict = "warning", "沒有找到 DWG"
-        else:
-            state, verdict = classify_outcome(result)
-        failed_files = result.get("failed_files", [])
-        shown = "\n".join(f"  - {friendly_failure(x)}" for x in failed_files[:8])
-        if len(failed_files) > 8:
-            shown += f"\n  ... 另有 {len(failed_files) - 8} 個（見 errors.log）"
-        still = result.get("still_files") or []
-        still_shown = "\n".join(f"  - {item}" for item in still[:8])
-        if len(still) > 8:
-            still_shown += f"\n  ... 另有 {len(still) - 8} 個"
-        st = STATE[state]
-        self.v_result.set(
-            f"{st['symbol']} {st['label']}：{verdict}\n"
-            f"DWG：{result.get('dwg', 0)}　成功：{result.get('ok', 0)}　"
-            f"失敗：{result.get('failed', 0)}　略過：{result.get('skipped', 0)}\n"
-            f"替換樣式：{result.get('styles_replaced', 0)}　"
-            f"存檔後仍缺字：{result.get('warnings', 0)}\n"
-            f"結果：logs/fontfix_results.csv"
-            + (f"\n錯誤：{result['fatal']}" if result.get("fatal") else "")
-            + (f"\n\n失敗檔案：\n{shown}" if failed_files else "")
-            + (f"\n\n仍缺字：\n{still_shown}" if still else "")
-        )
-        self._set_status(state, verdict)
-        if not result.get("fatal") and not result.get("stopped"):
-            self.v_progress.set(100)
-        self._refresh_analysis_outputs()
-        self._reveal(self.result_frame)
 
     def _combo_code(self, box, pairs):
         label = box.get()
@@ -1113,8 +1028,7 @@ class App:
         dst = self.v_out.get().strip()
         problem = fontfix.directory_problem(src, dst)
         if problem:
-            messagebox.showerror("路徑錯誤", problem)
-            return None
+            raise TaskError("路徑錯誤", problem)
         return src, dst
 
     def _replace_color(self):
@@ -1122,581 +1036,580 @@ class App:
             return None
         raw = self.v_rp_color.get().strip()
         if not raw.isdigit() or int(raw) > 256:
-            messagebox.showerror("色號錯誤", "ACI 色號必須是 0 到 256。")
-            return "bad"
+            raise TaskError("色號錯誤", "ACI 色號必須是 0 到 256。")
         return int(raw)
 
-    def _start_extract(self):
-        if self._busy():
-            return
-        if not self.env_ok:
-            messagebox.showerror("無法擷取文字", "找不到可用的 accoreconsole；請先完成環境設定並重新檢查。")
-            return
-        folders = self._text_folders()
-        if folders is None:
-            return
-        src, dst = folders
+    # ---- prepare: read and validate the current widgets, or raise TaskError ----
+    def _prepare_scan(self):
+        src = self.v_in.get().strip()
+        if not Path(src).is_dir():
+            raise TaskError("輸入資料夾不存在", src or "請選擇輸入資料夾")
+        return dict(input_dir=src, recursive=self.opts["recursive"].get())
+
+    def _prepare_versions(self):
+        src = self.v_in.get().strip()
+        dst = self.v_out.get().strip()
+        if not Path(src).is_dir():
+            raise TaskError("輸入資料夾不存在", src or "請選擇輸入資料夾")
+        if not dst:
+            raise TaskError("請指定輸出資料夾", "")
+        return dict(input_dir=src, output_dir=dst, recursive=self.opts["recursive"].get())
+
+    def _prepare_fontfix(self):
+        self._require_accore("修復字體")
+        src, dst = self._text_folders()
+        version = self._fontfix_version()
+        if version is None:
+            raise TaskError("版本錯誤", "不支援的 DWG 版本。")
+        return dict(
+            src=src, dst=dst, accore=self.cfg.get("accoreconsole", ""), version=version,
+            primary=self.v_ff_primary.get().strip() or fontfix.DEFAULT_PRIMARY,
+            big=self.v_ff_big.get().strip() or fontfix.DEFAULT_BIG,
+            mapping=fontfix.parse_mapping(self.ff_map_text.get("1.0", "end")),
+            recursive=self.opts["recursive"].get(), overwrite=self.v_ff_overwrite.get(),
+            timeout=int(self.cfg.get("timeout_seconds", 300)),
+        )
+
+    def _prepare_proxygraphics(self):
+        self._require_accore("設定代理圖形")
+        src, dst = self._text_folders()
+        return dict(
+            src=src, dst=dst, accore=self.cfg.get("accoreconsole", ""),
+            recursive=self.opts["recursive"].get(), overwrite=self.v_pg_overwrite.get(),
+            timeout=int(self.cfg.get("timeout_seconds", 300)),
+        )
+
+    def _prepare_extract(self):
+        self._require_accore("擷取文字")
+        src, dst = self._text_folders()
         mode = self._combo_code(self.tx_match_box, dwgtext.MATCH_MODES)
         problem = dwgtext.validate_rule(self.v_tx_pattern.get(), mode)
         if problem:
-            messagebox.showerror("搜尋文字", problem)
-            return
-        pattern = self.v_tx_pattern.get()
-        case_sensitive = self.v_tx_case.get()
-        include_blocks = self.v_tx_blocks.get()
-        recursive = self.opts["recursive"].get()
-        timeout = int(self.cfg.get("timeout_seconds", 300))
-        workers = self._workers()
-        accore = self.cfg.get("accoreconsole", "")
-        self.stop_event.clear()
-        self._can_stop = True
-        self.summary = None
-        self.v_progress.set(0)
-        self.v_ptext.set("")
-        self.v_current.set("")
-        self.v_result.set("擷取文字中...")
-        self._set_status("running", "文字擷取中…")
-
-        def work():
-            try:
-                result = textbatch.run_extract(
-                    src, dst, accore, pattern=pattern, mode=mode,
-                    case_sensitive=case_sensitive, include_blocks=include_blocks,
-                    recursive=recursive, timeout=timeout, workers=workers, stop_event=self.stop_event,
-                    progress=lambda i, n, cur: self.q.put(("progress", "文字擷取", i, n, cur)),
-                    log=lambda level, message: self.q.put(("log", level, message)),
-                )
-            except Exception as exc:  # noqa: BLE001
-                result = dict(dwg=0, ok=0, failed=0, skipped=0, warnings=0, hits=0,
-                              stopped=False, fatal=f"{type(exc).__name__}: {exc}",
-                              failed_files=[], elapsed=0)
-                common.log_error({"output_dir": dst}, f"textextract crashed: {result['fatal']}")
-            self.q.put(("extract_done", result))
-
-        self.worker = threading.Thread(target=work, daemon=True)
-        self.worker.start()
-        self._set_busy_ui(True)
-
-    def _on_text_done(self, result, title, detail_line, result_path):
-        self.summary = result
-        self.worker = None
-        self._can_stop = False
-        self._set_busy_ui(False)
-        if result.get("dwg", 0) == 0 and not result.get("fatal") and not result.get("stopped"):
-            state, verdict = "warning", "沒有找到 DWG"
-        else:
-            state, verdict = classify_outcome(result)
-        failed_files = result.get("failed_files", [])
-        shown = "\n".join(f"  - {friendly_failure(x)}" for x in failed_files[:8])
-        if len(failed_files) > 8:
-            shown += f"\n  ... 另有 {len(failed_files) - 8} 個（見 errors.log）"
-        st = STATE[state]
-        self.v_result.set(
-            f"{st['symbol']} {st['label']}：{verdict}\n"
-            f"DWG：{result.get('dwg', 0)}　成功：{result.get('ok', 0)}　"
-            f"失敗：{result.get('failed', 0)}　略過：{result.get('skipped', 0)}\n"
-            f"{detail_line}\n"
-            f"結果：{result_path}"
-            + (f"\n錯誤：{result['fatal']}" if result.get("fatal") else "")
-            + (f"\n\n失敗檔案：\n{shown}" if failed_files else "")
-        )
-        self._set_status(state, verdict)
-        if not result.get("fatal") and not result.get("stopped"):
-            self.v_progress.set(100)
-        self._refresh_analysis_outputs()
-        self._reveal(self.result_frame)
-
-    def _on_extract_done(self, result):
-        self._on_text_done(
-            result, "文字擷取",
-            f"符合筆數：{result.get('hits', 0)}",
-            "logs/textextract_hits.csv",
+            raise TaskError("搜尋文字", problem)
+        return dict(
+            src=src, dst=dst, accore=self.cfg.get("accoreconsole", ""),
+            pattern=self.v_tx_pattern.get(), mode=mode,
+            case_sensitive=self.v_tx_case.get(), include_blocks=self.v_tx_blocks.get(),
+            recursive=self.opts["recursive"].get(),
+            timeout=int(self.cfg.get("timeout_seconds", 300)),
         )
 
-    def _start_replace(self):
-        if self._busy():
-            return
-        if not self.env_ok:
-            messagebox.showerror("無法取代文字", "找不到可用的 accoreconsole；請先完成環境設定並重新檢查。")
-            return
-        folders = self._text_folders()
-        if folders is None:
-            return
+    def _prepare_replace(self):
+        self._require_accore("取代文字")
+        src, dst = self._text_folders()
         color = self._replace_color()
-        if color == "bad":
-            return
         mode = self._combo_code(self.rp_mode_box, dwgtext.REPLACE_MODES)
         find = self.v_rp_find.get()
         repl = self.v_rp_repl.get()
         problem = dwgtext.validate_rule(find, mode, replacement=repl, for_replace=True)
         if problem:
-            messagebox.showerror("取代規則", problem)
-            return
-        case_sensitive = self.v_rp_case.get()
-        include_blocks = self.v_rp_blocks.get()
-        dry_run = self.v_rp_dry.get()
-        copy_unchanged = self.v_rp_copy.get()
-        overwrite = self.v_rp_overwrite.get()
-        recursive = self.opts["recursive"].get()
-        timeout = int(self.cfg.get("timeout_seconds", 300))
-        workers = self._workers()
-        accore = self.cfg.get("accoreconsole", "")
-        src, dst = folders
-        self.stop_event.clear()
-        self._can_stop = True
-        self.summary = None
-        self.v_progress.set(0)
-        self.v_ptext.set("")
-        self.v_current.set("")
-        self.v_result.set("預覽文字取代中..." if dry_run else "取代文字中...")
-        self._set_status("running", "文字取代預覽中…" if dry_run else "文字取代中…")
-
-        def work():
-            try:
-                result = textbatch.run_replace(
-                    src, dst, accore, find=find, repl=repl, mode=mode,
-                    case_sensitive=case_sensitive, include_blocks=include_blocks,
-                    color=color, dry_run=dry_run, copy_unchanged=copy_unchanged,
-                    recursive=recursive, overwrite=overwrite, timeout=timeout, workers=workers,
-                    stop_event=self.stop_event,
-                    progress=lambda i, n, cur: self.q.put(("progress", "文字取代", i, n, cur)),
-                    log=lambda level, message: self.q.put(("log", level, message)),
-                )
-            except Exception as exc:  # noqa: BLE001
-                result = dict(dwg=0, ok=0, failed=0, skipped=0, warnings=0, changes=0,
-                              unchanged=0, stopped=False, fatal=f"{type(exc).__name__}: {exc}",
-                              failed_files=[], elapsed=0)
-                common.log_error({"output_dir": dst}, f"textreplace crashed: {result['fatal']}")
-            self.q.put(("replace_done", result))
-
-        self.worker = threading.Thread(target=work, daemon=True)
-        self.worker.start()
-        self._set_busy_ui(True)
-
-    def _on_replace_done(self, result):
-        self._on_text_done(
-            result, "文字取代",
-            f"變更筆數：{result.get('changes', 0)}　無變更：{result.get('unchanged', 0)}",
-            "logs/textreplace_changes.csv",
+            raise TaskError("取代規則", problem)
+        return dict(
+            src=src, dst=dst, accore=self.cfg.get("accoreconsole", ""),
+            find=find, repl=repl, mode=mode, color=color,
+            case_sensitive=self.v_rp_case.get(), include_blocks=self.v_rp_blocks.get(),
+            dry_run=self.v_rp_dry.get(), copy_unchanged=self.v_rp_copy.get(),
+            overwrite=self.v_rp_overwrite.get(), recursive=self.opts["recursive"].get(),
+            timeout=int(self.cfg.get("timeout_seconds", 300)),
         )
 
-    # ---------- title-block attributes ----------
-    def _build_titleblock(self):
-        box = ttk.Frame(self.mode_frame)
-        self.mode_frames["titleblock"] = box
-        ttk.Label(box, text="圖框屬性",
-                  font=(tkfont.nametofont("TkDefaultFont").actual("family"), 11)).pack(anchor="w")
-        ttk.Label(
-            box,
-            text=("匯出：把符合名稱的圖框 Block 屬性寫成輸出資料夾裡的 titleblock_attrs.csv"
-                  "（每個圖框一列，每個 tag 一欄），可用 Excel 編輯。\n"
-                  "寫回：讀回編輯過的 CSV，只把和圖面不同的值寫回。每個 DWG 先複製到暫存檔處理，"
-                  "原始圖檔不會被改寫，變更後的 DWG 寫到輸出資料夾。"),
-            justify="left", wraplength=760,
-        ).pack(anchor="w", pady=(2, 6))
-        form = ttk.Frame(box)
-        form.pack(fill="x")
-        self.v_tb_blocks = tk.StringVar(value="TITLE*, 圖框*")
-        self.v_tb_csv = tk.StringVar()
-        ttk.Label(form, text="圖框 Block 名稱", width=14).grid(row=0, column=0, sticky="w", pady=2)
-        ttk.Entry(form, textvariable=self.v_tb_blocks).grid(row=0, column=1, sticky="ew", pady=2)
-        ttk.Label(form, text="寫回用 CSV", width=14).grid(row=1, column=0, sticky="w", pady=2)
-        ttk.Entry(form, textvariable=self.v_tb_csv).grid(row=1, column=1, sticky="ew", pady=2)
-        self.btn_tb_csv = ttk.Button(form, text="選擇…", command=self._browse_tb_csv)
-        self.btn_tb_csv.grid(row=1, column=2, padx=(6, 0), pady=2)
-        form.columnconfigure(1, weight=1)
-        ttk.Label(box, text="名稱可用 * 與 ?，多個以逗號分隔；動態圖塊以有效名稱比對。").pack(anchor="w")
-        self.v_tb_dry = tk.BooleanVar(value=False)
-        self.v_tb_overwrite = tk.BooleanVar(value=False)
-        ttk.Checkbutton(box, text="匯出時包含子資料夾", variable=self.opts["recursive"]).pack(anchor="w")
-        ttk.Checkbutton(box, text="寫回時只預覽變更，不輸出 DWG", variable=self.v_tb_dry).pack(anchor="w")
-        ttk.Checkbutton(box, text="覆寫既有的輸出 DWG", variable=self.v_tb_overwrite).pack(anchor="w")
-        buttons = ttk.Frame(box)
-        buttons.pack(anchor="w", pady=(8, 0))
-        self.btn_tb_read = ttk.Button(buttons, text="匯出圖框屬性", command=self._start_tb_read)
-        self.btn_tb_read.pack(side="left")
-        self.btn_tb_write = ttk.Button(buttons, text="寫回圖框屬性", command=self._start_tb_write)
-        self.btn_tb_write.pack(side="left", padx=6)
-
-    def _tb_set_busy(self, busy):
-        self.btn_tb_csv.configure(state="disabled" if busy else "normal")
-        for button in (self.btn_tb_read, self.btn_tb_write):
-            button.configure(state="normal" if not busy and self.env_ok else "disabled")
-
-    def _browse_tb_csv(self):
-        path = filedialog.askopenfilename(title="選擇 titleblock_attrs.csv",
-                                          filetypes=[("CSV", "*.csv"), ("所有檔案", "*.*")])
-        if path:
-            self.v_tb_csv.set(path)
-
-    def _tb_start(self, title, running, done_kind, call):
-        """Shared start path for both title-block jobs. ``call`` runs in the worker thread."""
-        if self._busy():
-            return
-        if not self.env_ok:
-            messagebox.showerror(title, "找不到可用的 accoreconsole；請先完成環境設定並重新檢查。")
-            return
-        folders = self._text_folders()
-        if folders is None:
-            return
-        src, dst = folders
-        timeout = int(self.cfg.get("timeout_seconds", 300))
-        accore = self.cfg.get("accoreconsole", "")
-        self.stop_event.clear()
-        self._can_stop = True
-        self.summary = None
-        self.v_progress.set(0)
-        self.v_ptext.set("")
-        self.v_current.set("")
-        self.v_result.set(f"{running}...")
-        self._set_status("running", f"{running}…")
-
-        def work():
-            try:
-                result = call(
-                    src, dst, accore, timeout=timeout, stop_event=self.stop_event,
-                    progress=lambda i, n, cur: self.q.put(("progress", title, i, n, cur)),
-                    log=lambda level, message: self.q.put(("log", level, message)),
-                )
-            except Exception as exc:  # noqa: BLE001
-                result = dict(dwg=0, ok=0, failed=0, skipped=0, warnings=0, blocks=0, changes=0,
-                              unchanged=0, stopped=False, fatal=f"{type(exc).__name__}: {exc}",
-                              failed_files=[], elapsed=0, csv="")
-                common.log_error({"output_dir": dst}, f"titleblock crashed: {result['fatal']}")
-            self.q.put((done_kind, result))
-
-        self.worker = threading.Thread(target=work, daemon=True)
-        self.worker.start()
-        self._set_busy_ui(True)
-
-    def _start_tb_read(self):
-        patterns = self.v_tb_blocks.get()
-        problem = titleblock.validate_patterns(patterns)
-        if problem and self.env_ok:
-            messagebox.showerror("圖框 Block 名稱", problem)
-            return
-        recursive = self.opts["recursive"].get()
-        self._tb_start("匯出圖框屬性", "匯出圖框屬性中", "tb_read_done",
-                       lambda *args, **kwargs: titleblock_batch.run_read(
-                           *args, patterns=patterns, recursive=recursive, **kwargs))
-
-    def _start_tb_write(self):
-        csv_path = self.v_tb_csv.get().strip()
-        if not csv_path and self.env_ok:
-            messagebox.showerror("寫回圖框屬性", "請選擇編輯過的 titleblock_attrs.csv（CSV 檔）")
-            return
-        dry_run = self.v_tb_dry.get()
-        overwrite = self.v_tb_overwrite.get()
-        self._tb_start("寫回圖框屬性", "預覽圖框屬性寫回中" if dry_run else "寫回圖框屬性中", "tb_write_done",
-                       lambda *args, **kwargs: titleblock_batch.run_write(
-                           *args, csv_path=csv_path, dry_run=dry_run, overwrite=overwrite, **kwargs))
-
-    def _on_tb_read_done(self, result):
-        if result.get("csv"):
-            self.v_tb_csv.set(result["csv"])
-        self._on_text_done(result, "匯出圖框屬性", f"圖框數：{result.get('blocks', 0)}", "titleblock_attrs.csv")
-
-    def _on_tb_write_done(self, result):
-        self._on_text_done(
-            result, "寫回圖框屬性",
-            f"變更筆數：{result.get('changes', 0)}　無變更：{result.get('unchanged', 0)}",
-            "logs/titleblock_results.csv",
-        )
-
-    def _start_layerclass(self):
-        if self._busy():
-            return
-        if not self.env_ok:
-            messagebox.showerror("無法分圖層", "找不到可用的 accoreconsole；請先完成環境設定並重新檢查。")
-            return
-        src = self.v_in.get().strip()
-        dst = self.v_out.get().strip()
-        problem = fontfix.directory_problem(src, dst)
-        if problem:
-            messagebox.showerror("路徑錯誤", problem)
-            return
+    def _prepare_layerclass(self):
+        self._require_accore("分圖層")
+        src, dst = self._text_folders()
         type_map = self.layer_map_text.get("1.0", "end")
-        prefix = self.v_ly_prefix.get()
-        other = self.v_ly_other.get()
-        source_mode = self.v_ly_scope.get()
-        source_layers = self.v_ly_sources.get()
         _settings, _notes, rule_error = layerclass.compile_rules(
-            type_map, prefix, other, source_mode, source_layers, self.v_ly_insert.get(),
+            type_map, self.v_ly_prefix.get(), self.v_ly_other.get(),
+            self.v_ly_scope.get(), self.v_ly_sources.get(), self.v_ly_insert.get(),
         )
         if rule_error:
-            messagebox.showerror("分圖層設定", rule_error)
-            return
-        include_paper = self.v_ly_paper.get()
-        include_blocks = self.v_ly_blocks.get()
-        insert_by_name = self.v_ly_insert.get()
-        unlock_locked = self.v_ly_unlock.get()
-        keep_appearance = self.v_ly_keep.get()
-        dry_run = self.v_ly_dry.get()
-        overwrite = self.v_ly_overwrite.get()
-        recursive = self.opts["recursive"].get()
-        timeout = int(self.cfg.get("timeout_seconds", 300))
-        workers = self._workers()
-        accore = self.cfg.get("accoreconsole", "")
-        self.stop_event.clear()
-        self._can_stop = True
-        self.summary = None
-        self.v_progress.set(0)
-        self.v_ptext.set("")
-        self.v_current.set("")
-        self.v_result.set("預覽分圖層中..." if dry_run else "分圖層中...")
-        self._set_status("running", "自動分圖層預覽中…" if dry_run else "自動分圖層中…")
+            raise TaskError("分圖層設定", rule_error)
+        return dict(
+            src=src, dst=dst, accore=self.cfg.get("accoreconsole", ""), type_map=type_map,
+            prefix=self.v_ly_prefix.get(), other=self.v_ly_other.get(),
+            source_mode=self.v_ly_scope.get(), source_layers=self.v_ly_sources.get(),
+            include_paper=self.v_ly_paper.get(), include_blocks=self.v_ly_blocks.get(),
+            insert_by_name=self.v_ly_insert.get(), unlock_locked=self.v_ly_unlock.get(),
+            keep_appearance=self.v_ly_keep.get(), dry_run=self.v_ly_dry.get(),
+            overwrite=self.v_ly_overwrite.get(), recursive=self.opts["recursive"].get(),
+            timeout=int(self.cfg.get("timeout_seconds", 300)),
+        )
 
-        def work():
-            try:
-                result = layerbatch.run(
-                    src, dst, accore, type_map=type_map, prefix=prefix, other=other,
-                    source_mode=source_mode, source_layers=source_layers,
-                    include_paper=include_paper, include_blocks=include_blocks,
-                    insert_by_name=insert_by_name, unlock_locked=unlock_locked,
-                    keep_appearance=keep_appearance, dry_run=dry_run,
-                    recursive=recursive, overwrite=overwrite, timeout=timeout, workers=workers,
-                    stop_event=self.stop_event,
-                    progress=lambda i, n, cur: self.q.put(("progress", "自動分圖層", i, n, cur)),
-                    log=lambda level, message: self.q.put(("log", level, message)),
-                )
-            except Exception as exc:  # noqa: BLE001
-                result = dict(dwg=0, ok=0, failed=0, skipped=0, warnings=0, moved=0, created=0,
-                              unchanged=0, stopped=False, fatal=f"{type(exc).__name__}: {exc}",
-                              failed_files=[], notes=[], elapsed=0)
-                common.log_error({"output_dir": dst}, f"layerclass crashed: {result['fatal']}")
-            self.q.put(("layer_done", result))
+    def _prepare_dwg(self):
+        self._require_accore("處理 DWG")
+        cfg = self._current_cfg()
+        if not Path(cfg["input_dir"]).is_dir():
+            raise TaskError("輸入資料夾不存在", cfg["input_dir"])
+        if not cfg["output_dir"]:
+            raise TaskError("請指定輸出資料夾", "")
+        if not cfg["keywords"] and self.opts["scada"].get():
+            raise TaskError("沒有關鍵字", "SCADA 搜尋需要至少一個關鍵字")
+        return dict(cfg=cfg, opts={key: var.get() for key, var in self.opts.items()})
 
-        self.worker = threading.Thread(target=work, daemon=True)
-        self.worker.start()
-        self._set_busy_ui(True)
+    def _prepare_analysis(self):
+        cfg = self._current_cfg()
+        cfg["recursive"] = self.opts["recursive"].get()
+        inputs = self.analysis_inputs or [cfg["input_dir"]]
+        if not cfg["output_dir"] or any(not Path(p).exists() for p in inputs):
+            raise TaskError("路徑錯誤", "請選擇存在的輸入檔案／資料夾，並指定輸出資料夾。")
+        return dict(cfg=cfg, inputs=inputs)
 
-    def _on_layer_done(self, result):
-        self.summary = result
-        self.worker = None
-        self._can_stop = False
-        self._set_busy_ui(False)
+    # ---- run: called on the worker thread; never touches tkinter ----
+    def _run_scan(self, params, log, progress):
+        return pipeline.scan(params["input_dir"], params["recursive"])
+
+    def _run_versions(self, params, log, progress):
+        csv_path = Path(params["output_dir"]) / "csv" / "dwg_versions.csv"
+        rows = dwg_version.write_version_csv(
+            [Path(params["input_dir"])], csv_path, recursive=params["recursive"])
+        ok = sum(row["status"] == "OK" for row in rows)
+        unknown = sum(row["status"] == "UNKNOWN_CODE" for row in rows)
+        return dict(csv=str(csv_path), total=len(rows), ok=ok, unknown=unknown,
+                    invalid=len(rows) - ok - unknown,
+                    dwt=sum(row["extension"] == ".dwt" for row in rows))
+
+    def _run_fontfix(self, params, log, progress):
+        return fontfix_batch.run(
+            params["src"], params["dst"], params["accore"], recursive=params["recursive"],
+            primary=params["primary"], big=params["big"], mapping=params["mapping"],
+            version=params["version"], overwrite=params["overwrite"], timeout=params["timeout"],
+            stop_event=self.stop_event, progress=progress, log=log,
+        )
+
+    def _run_proxygraphics(self, params, log, progress):
+        return proxybatch.run(
+            params["src"], params["dst"], params["accore"], recursive=params["recursive"],
+            overwrite=params["overwrite"], timeout=params["timeout"],
+            stop_event=self.stop_event, progress=progress, log=log,
+        )
+
+    def _run_extract(self, params, log, progress):
+        return textbatch.run_extract(
+            params["src"], params["dst"], params["accore"], pattern=params["pattern"],
+            mode=params["mode"], case_sensitive=params["case_sensitive"],
+            include_blocks=params["include_blocks"], recursive=params["recursive"],
+            timeout=params["timeout"], stop_event=self.stop_event, progress=progress, log=log,
+        )
+
+    def _run_replace(self, params, log, progress):
+        return textbatch.run_replace(
+            params["src"], params["dst"], params["accore"], find=params["find"],
+            repl=params["repl"], mode=params["mode"], case_sensitive=params["case_sensitive"],
+            include_blocks=params["include_blocks"], color=params["color"],
+            dry_run=params["dry_run"], copy_unchanged=params["copy_unchanged"],
+            recursive=params["recursive"], overwrite=params["overwrite"],
+            timeout=params["timeout"], stop_event=self.stop_event, progress=progress, log=log,
+        )
+
+    def _run_layerclass(self, params, log, progress):
+        return layerbatch.run(
+            params["src"], params["dst"], params["accore"], type_map=params["type_map"],
+            prefix=params["prefix"], other=params["other"], source_mode=params["source_mode"],
+            source_layers=params["source_layers"], include_paper=params["include_paper"],
+            include_blocks=params["include_blocks"], insert_by_name=params["insert_by_name"],
+            unlock_locked=params["unlock_locked"], keep_appearance=params["keep_appearance"],
+            dry_run=params["dry_run"], recursive=params["recursive"],
+            overwrite=params["overwrite"], timeout=params["timeout"],
+            stop_event=self.stop_event, progress=progress, log=log,
+        )
+
+    def _run_dwg(self, params, log, progress):
+        return pipeline.run_pipeline(params["cfg"], params["opts"], log=log, progress=progress,
+                                     stop_event=self.stop_event)
+
+    def _run_analysis(self, params, log, progress):
+        return pipeline.run_pipeline(params["cfg"], dict(multiformat=True, inputs=params["inputs"]),
+                                     log=log, progress=progress, stop_event=self.stop_event)
+
+    # ---- render: turn one finished result into (state, verdict, body) ----
+    @staticmethod
+    def _failed_files_block(items):
+        items = list(items or [])
+        if not items:
+            return ""
+        shown = "\n".join(f"  - {friendly_failure(item)}" for item in items[:8])
+        if len(items) > 8:
+            shown += f"\n  ... 另有 {len(items) - 8} 個（見 errors.log）"
+        return f"\n\n失敗檔案：\n{shown}"
+
+    def _render_scan(self, result):
+        if result.get("fatal"):
+            self.v_scan.set("")
+            return "failed", "掃描失敗", f"錯誤：{result['fatal']}"
+        self.v_scan.set(
+            f"找到 DWG：{result['dwg']}｜DXF：{result['dxf']}｜總容量：{pipeline.fmt_size(result['size'])}｜"
+            f"資料夾：{result['folders']}｜中文檔名：{result['chinese']}｜空白路徑：{result['spaces']}｜"
+            f"重複檔名：{result['duplicates']}")
+        self._log("INFO", self.v_scan.get())
+        total = result["dwg"] + result["dxf"]
+        return "success", "掃描完成", (
+            f"檔案：{total}　DWG：{result['dwg']}　DXF：{result['dxf']}　資料夾：{result['folders']}")
+
+    def _render_versions(self, result):
+        if result.get("fatal"):
+            self.v_scan.set("")
+            return "failed", "版本表失敗", f"錯誤：{result['fatal']}"
+        self.v_scan.set(
+            f"版本表完成：{result['total']} 檔（DWT {result['dwt']}）｜已辨識：{result['ok']}｜"
+            f"未知代碼：{result['unknown']}｜異常：{result['invalid']}")
+        self._log("OK", f"DWG/DWT 版本表已輸出：{result['csv']}")
+        state = "warning" if result["unknown"] or result["invalid"] else "success"
+        return state, "版本表完成", (
+            f"檔案：{result['total']}　已辨識：{result['ok']}　未知代碼：{result['unknown']}　"
+            f"異常：{result['invalid']}　DWT：{result['dwt']}\n結果：{result['csv']}")
+
+    def _render_fontfix(self, result):
+        if result.get("dwg", 0) == 0 and not result.get("fatal") and not result.get("stopped"):
+            state, verdict = "warning", "沒有找到 DWG 或 DWT"
+        else:
+            state, verdict = classify_outcome(result)
+        lines = [
+            f"DWG/DWT：{result.get('dwg', 0)}　成功：{result.get('ok', 0)}　"
+            f"失敗：{result.get('failed', 0)}　略過：{result.get('skipped', 0)}",
+            f"替換樣式：{result.get('styles_replaced', 0)}　"
+            f"存檔後仍缺字：{result.get('warnings', 0)}",
+            "結果：logs/fontfix_results.csv",
+        ]
+        if result.get("fatal"):
+            lines.append(f"錯誤：{result['fatal']}")
+        still = result.get("still_files") or []
+        if still:
+            shown = "\n".join(f"  - {item}" for item in still[:8])
+            if len(still) > 8:
+                shown += f"\n  ... 另有 {len(still) - 8} 個"
+            lines.append(f"仍缺字：\n{shown}")
+        return state, verdict, "\n".join(lines) + self._failed_files_block(result.get("failed_files"))
+
+    def _render_proxygraphics(self, result):
         if result.get("dwg", 0) == 0 and not result.get("fatal") and not result.get("stopped"):
             state, verdict = "warning", "沒有找到 DWG"
         else:
             state, verdict = classify_outcome(result)
-        failed_files = result.get("failed_files", [])
-        shown = "\n".join(f"  - {friendly_failure(x)}" for x in failed_files[:8])
-        if len(failed_files) > 8:
-            shown += f"\n  ... 另有 {len(failed_files) - 8} 個（見 errors.log）"
-        st = STATE[state]
-        self.v_result.set(
-            f"{st['symbol']} {st['label']}：{verdict}\n"
+        lines = [
             f"DWG：{result.get('dwg', 0)}　成功：{result.get('ok', 0)}　"
-            f"失敗：{result.get('failed', 0)}　略過：{result.get('skipped', 0)}\n"
+            f"失敗：{result.get('failed', 0)}　略過：{result.get('skipped', 0)}",
+            "結果：logs/proxygraphics_results.csv",
+        ]
+        if result.get("fatal"):
+            lines.append(f"錯誤：{result['fatal']}")
+        return state, verdict, "\n".join(lines) + self._failed_files_block(result.get("failed_files"))
+
+    def _render_text_result(self, result, detail_line, result_path):
+        if result.get("dwg", 0) == 0 and not result.get("fatal") and not result.get("stopped"):
+            state, verdict = "warning", "沒有找到 DWG"
+        else:
+            state, verdict = classify_outcome(result)
+        lines = [
+            f"DWG：{result.get('dwg', 0)}　成功：{result.get('ok', 0)}　"
+            f"失敗：{result.get('failed', 0)}　略過：{result.get('skipped', 0)}",
+            detail_line,
+            f"結果：{result_path}",
+        ]
+        if result.get("fatal"):
+            lines.append(f"錯誤：{result['fatal']}")
+        return state, verdict, "\n".join(lines) + self._failed_files_block(result.get("failed_files"))
+
+    def _render_extract(self, result):
+        return self._render_text_result(result, f"符合筆數：{result.get('hits', 0)}",
+                                        "logs/textextract_hits.csv")
+
+    def _render_replace(self, result):
+        return self._render_text_result(
+            result,
+            f"變更筆數：{result.get('changes', 0)}　無變更：{result.get('unchanged', 0)}",
+            "logs/textreplace_changes.csv")
+
+    def _render_layerclass(self, result):
+        if result.get("dwg", 0) == 0 and not result.get("fatal") and not result.get("stopped"):
+            state, verdict = "warning", "沒有找到 DWG"
+        else:
+            state, verdict = classify_outcome(result)
+        lines = [
+            f"DWG：{result.get('dwg', 0)}　成功：{result.get('ok', 0)}　"
+            f"失敗：{result.get('failed', 0)}　略過：{result.get('skipped', 0)}",
             f"搬移數量：{result.get('moved', 0)}　新建圖層：{result.get('created', 0)}　"
-            f"無變更：{result.get('unchanged', 0)}\n"
-            f"結果：logs/layerclass_moves.csv"
-            + (f"\n錯誤：{result['fatal']}" if result.get("fatal") else "")
-            + (f"\n\n失敗檔案：\n{shown}" if failed_files else "")
-        )
-        self._set_status(state, verdict)
-        if not result.get("fatal") and not result.get("stopped"):
-            self.v_progress.set(100)
-        self._refresh_analysis_outputs()
-        self._reveal(self.result_frame)
+            f"無變更：{result.get('unchanged', 0)}",
+            "結果：logs/layerclass_moves.csv",
+        ]
+        if result.get("fatal"):
+            lines.append(f"錯誤：{result['fatal']}")
+        return state, verdict, "\n".join(lines) + self._failed_files_block(result.get("failed_files"))
 
-    # ---------- DWG diff ----------
-    def _build_diff_frame(self):
-        box = ttk.Frame(self.mode_frame)
-        self.mode_frames["dwgdiff"] = box
-        ttk.Label(box, text="差異比對",
-                  font=(tkfont.nametofont("TkDefaultFont").actual("family"), 11)).pack(anchor="w")
-        ttk.Label(
-            box,
-            text=("比對兩版圖面：可選兩個檔案，或兩個資料夾（依相對路徑配對，副檔名不計）。\n"
-                  "DWG 會先用 accoreconsole 轉成 DXF；DXF 直接讀取。原始圖檔不會被修改。\n"
-                  "結果寫到輸出資料夾的 dwgdiff/（diff_summary.csv、diff_details.csv、diff_report.json）。"),
-            justify="left", wraplength=760,
-        ).pack(anchor="w", pady=(2, 6))
-        form = ttk.Frame(box)
-        form.pack(fill="x")
-        self.v_df_old = tk.StringVar(value="")
-        self.v_df_new = tk.StringVar(value="")
-        self.v_df_tol = tk.StringVar(value="0.001")
-        for row, (label, var) in enumerate((("舊版（檔案或資料夾）", self.v_df_old), ("新版（檔案或資料夾）", self.v_df_new))):
-            ttk.Label(form, text=label, width=20).grid(row=row, column=0, sticky="w", pady=2)
-            ttk.Entry(form, textvariable=var).grid(row=row, column=1, sticky="ew", pady=2, padx=4)
-            ttk.Button(form, text="資料夾", command=lambda v=var: self._browse(v)).grid(row=row, column=2, padx=2)
-            ttk.Button(form, text="檔案", command=lambda v=var: self._browse_drawing(v)).grid(row=row, column=3, padx=2)
-        ttk.Label(form, text="座標容差", width=20).grid(row=2, column=0, sticky="w", pady=2)
-        ttk.Entry(form, textvariable=self.v_df_tol, width=12).grid(row=2, column=1, sticky="w", pady=2, padx=4)
-        form.columnconfigure(1, weight=1)
-        self.v_df_handles = tk.BooleanVar(value=True)
-        self.v_df_paper = tk.BooleanVar(value=True)
-        ttk.Checkbutton(box, text="優先以 handle 配對物件（取消則只用類型＋圖層＋幾何）",
-                        variable=self.v_df_handles).pack(anchor="w")
-        ttk.Checkbutton(box, text="包含配置（紙空間）", variable=self.v_df_paper).pack(anchor="w")
-        ttk.Checkbutton(box, text="包含子資料夾", variable=self.opts["recursive"]).pack(anchor="w")
-        self.btn_diff = ttk.Button(box, text="開始比對", command=self._start_diff)
-        self.btn_diff.pack(anchor="w", pady=(8, 0))
+    def _render_dwg(self, result):
+        state, verdict = classify_outcome(result)
+        lines = [
+            f"DWG：{result.get('dwg', 0)}",
+            f"成功：{result.get('ok', 0)}",
+            f"失敗：{result.get('failed', 0)}",
+            f"略過：{result.get('skipped', 0)}",
+            f"分析失敗：{result.get('analyze_failed', 0)}",
+            f"DXF：{result.get('dxf', 0)}",
+            f"Keyword Hits：{result.get('keyword_hits', 0)}",
+            f"Unique Matched Objects：{result.get('unique_objects', 0)}",
+            f"Suspect text records：{result.get('suspect_texts', 0)}",
+            f"耗時：{pipeline.fmt_duration(result.get('elapsed', 0))}",
+        ]
+        if result.get("fatal"):
+            lines.append(f"錯誤：{result['fatal']}")
+        return state, verdict, "\n".join(lines) + self._failed_files_block(result.get("failed_files"))
 
-    def _browse_drawing(self, var):
-        path = filedialog.askopenfilename(title="選擇圖檔", filetypes=[("圖檔", "*.dwg *.dxf"), ("所有檔案", "*.*")])
-        if path:
-            var.set(path)
+    def _render_analysis(self, result):
+        state, verdict = classify_outcome(result)
+        lines = [
+            f"檔案：{result.get('total', 0)}　成功：{result.get('ok', 0)}　"
+            f"失敗：{result.get('failed', 0)}　略過：{result.get('skipped', 0)}　"
+            f"警告：{result.get('warnings', 0)}",
+        ]
+        if result.get("fatal"):
+            lines.append(f"錯誤：{result['fatal']}")
+        return state, verdict, "\n".join(lines) + self._failed_files_block(result.get("failed_files"))
 
-    def _start_diff(self):
-        if self._busy():
-            return
-        old, new = self.v_df_old.get().strip(), self.v_df_new.get().strip()
-        dst = self.v_out.get().strip()
-        if not old or not new or not dst:
-            messagebox.showerror("路徑錯誤", "請指定舊版、新版與輸出資料夾。")
-            return
-        tolerance = self.v_df_tol.get().strip()
-        use_handles = self.v_df_handles.get()
-        include_paper = self.v_df_paper.get()
-        recursive = self.opts["recursive"].get()
-        timeout = int(self.cfg.get("timeout_seconds", 300))
-        accore = self.cfg.get("accoreconsole", "")
-        self.stop_event.clear()
-        self._can_stop = True
-        self.summary = None
-        self.v_progress.set(0)
-        self.v_ptext.set("")
-        self.v_current.set("")
-        self.v_result.set("比對中...")
-        self._set_status("running", "差異比對中…")
+    # ---- single-task compatibility entry points ----
+    def _scan(self):
+        self._start_tasks(["scan"])
 
-        def work():
-            try:
-                result = dwgdiff.run(
-                    old, new, dst, accore, tolerance=tolerance, recursive=recursive,
-                    use_handles=use_handles, include_paper=include_paper, timeout=timeout,
-                    stop_event=self.stop_event,
-                    on_progress=lambda stage, i, n, cur: self.q.put(("progress", stage, i, n, cur)),
-                    log=lambda level, message: self.q.put(("log", level, message)),
-                )
-            except Exception as exc:  # noqa: BLE001
-                result = dict(pairs=0, ok=0, changed=0, identical=0, failed=0, skipped=0, added=0,
-                              removed=0, modified=0, stopped=False, fatal=f"{type(exc).__name__}: {exc}",
-                              failed_files=[], elapsed=0)
-                common.log_error({"output_dir": dst}, f"dwgdiff crashed: {result['fatal']}")
-            self.q.put(("diff_done", result))
+    def _scan_versions(self):
+        self._start_tasks(["version"])
 
-        self.worker = threading.Thread(target=work, daemon=True)
-        self.worker.start()
-        self._set_busy_ui(True)
-        self.btn_diff.configure(state="disabled")
+    def _start_fontfix(self):
+        self._start_tasks(["fontfix"])
 
-    def _on_diff_done(self, result):
+    def _start_proxygraphics(self):
+        self._start_tasks(["proxygraphics"])
+
+    def _start_extract(self):
+        self._start_tasks(["textextract"])
+
+    def _start_replace(self):
+        self._start_tasks(["textreplace"])
+
+    def _start_layerclass(self):
+        self._start_tasks(["layerclass"])
+
+    def _on_fontfix_done(self, result):
+        self._show_finished("fontfix", result)
+
+    def _on_proxygraphics_done(self, result):
+        self._show_finished("proxygraphics", result)
+
+    def _on_extract_done(self, result):
+        self._show_finished("textextract", result)
+
+    def _on_replace_done(self, result):
+        self._show_finished("textreplace", result)
+
+    def _on_layer_done(self, result):
+        self._show_finished("layerclass", result)
+
+    # ---------- direct result rendering ----------
+    def _show_finished(self, key, result):
+        """Render one finished task outside the worker queue (used by the compatibility handlers)."""
         self.summary = result
         self.worker = None
         self._can_stop = False
         self._set_busy_ui(False)
-        self.btn_diff.configure(state="normal")
-        if result.get("pairs", 0) == 0 and not result.get("fatal"):
-            state, verdict = "warning", "沒有找到可比對的 DWG / DXF"
-        else:
-            state, verdict = classify_outcome(result)
-        failed_files = result.get("failed_files", [])
-        shown = "\n".join(f"  - {x}" for x in failed_files[:8])
-        if len(failed_files) > 8:
-            shown += f"\n  ... 另有 {len(failed_files) - 8} 個（見 errors.log）"
-        st = STATE[state]
-        self.v_result.set(
-            f"{st['symbol']} {st['label']}：{verdict}\n"
-            f"配對：{result.get('pairs', 0)}　有差異：{result.get('changed', 0)}　相同：{result.get('identical', 0)}　"
-            f"只在一邊：{result.get('skipped', 0)}　失敗：{result.get('failed', 0)}\n"
-            f"新增：{result.get('added', 0)}　刪除：{result.get('removed', 0)}　修改：{result.get('modified', 0)}\n"
-            f"結果：dwgdiff/diff_summary.csv、dwgdiff/diff_details.csv"
-            + (f"\n錯誤：{result['fatal']}" if result.get("fatal") else "")
-            + (f"\n\n失敗檔案：\n{shown}" if failed_files else "")
-        )
-        self._set_status(state, verdict)
-        if not result.get("fatal") and not result.get("stopped"):
+        state, verdict, body = self._renderers[key](result)
+        self._show_result_text(state, verdict, body)
+        if not result.get("stopped"):
             self.v_progress.set(100)
+
+    def _show_result_text(self, state, verdict, body):
+        self.v_result.set(f"{STATE[state]['symbol']} {STATE[state]['label']}：{verdict}\n{body}")
+        self._set_status(state, verdict)
         self._refresh_analysis_outputs()
         self._reveal(self.result_frame)
 
-    def _browse_layer_standard(self):
-        path = filedialog.askopenfilename(title="選擇圖層標準檔",
-                                          filetypes=[("圖層標準", "*.csv *.json"), ("所有檔案", "*.*")])
-        if path:
-            self.v_ls_standard.set(path)
-
-    def _start_layerstd(self):
-        """DXF files need no AutoCAD; DWGs without accoreconsole are reported per file."""
-        if self._busy():
-            return
-        src = self.v_in.get().strip()
-        dst = self.v_out.get().strip()
-        standard = self.v_ls_standard.get().strip()
-        if not Path(src).is_dir():
-            messagebox.showerror("路徑錯誤", f"輸入資料夾不存在：{src}")
-            return
-        if not dst:
-            messagebox.showerror("路徑錯誤", "請選擇輸出資料夾")
+    def _log_crash(self, key, params, text):
+        out = (params.get("dst") or params.get("output_dir")
+               or (params.get("cfg") or {}).get("output_dir") or self._batch_out)
+        if not out:
             return
         try:
-            layerstd.load_standard(standard)
-        except (OSError, ValueError, re.error) as exc:
-            messagebox.showerror("圖層標準檔", str(exc))
+            common.log_error({"output_dir": out}, f"{key} crashed: {text}")
+        except OSError:
+            pass
+
+    # ---------- batch runner ----------
+    def _start_selected(self):
+        keys = self._selected_modes()
+        if not keys:
+            messagebox.showinfo("尚未勾選任務", "請先在「② 我要做什麼？」勾選至少一項任務。")
             return
-        accore = self.cfg.get("accoreconsole", "") if self.env_ok else ""
-        recursive = self.opts["recursive"].get()
-        overwrite = self.v_ls_overwrite.get()
-        timeout = int(self.cfg.get("timeout_seconds", 300))
+        self._start_tasks(keys)
+
+    def _start_tasks(self, keys):
+        """Validate every requested task first, then run the valid ones in order on one worker thread."""
+        if self._busy():
+            return
+        prepared, errors = [], []
+        for key in keys:
+            try:
+                prepared.append((key, self._preparers[key]()))
+            except TaskError as exc:
+                errors.append((key, exc.title, exc.message))
+            except Exception as exc:  # noqa: BLE001 - a broken setting must not kill the GUI
+                errors.append((key, "無法開始任務", f"{type(exc).__name__}: {exc}"))
+        if errors:
+            for key, _title, message in errors:
+                self._log("WARN", f"{TASK_LABELS[key]} 未執行：{message}")
+            lines = [f"・{TASK_LABELS[key]}：{message}" for key, _title, message in errors]
+            if not prepared:
+                messagebox.showerror(errors[0][1] if len(errors) == 1 else "無法開始任務", "\n".join(lines))
+                return
+            messagebox.showwarning(
+                "部分任務未執行",
+                "以下任務的設定未完成，已略過：\n" + "\n".join(lines)
+                + f"\n\n其餘 {len(prepared)} 項任務會繼續執行。")
+        total = len(prepared)
         self.stop_event.clear()
-        self._can_stop = True
+        self._can_stop = any(key not in ("scan", "version") for key, _ in prepared)
         self.summary = None
+        self._batch = dict(total=total, results=[])
+        self._batch_out = self.v_out.get().strip()   # worker thread reads this plain string, never tkinter
         self.v_progress.set(0)
         self.v_ptext.set("")
         self.v_current.set("")
-        self.v_result.set("圖層標準檢查中...")
-        self._set_status("running", "圖層標準檢查中…")
+        self.v_result.set("處理中…")
+        names = "、".join(TASK_LABELS[key] for key, _ in prepared)
+        if total == 1:
+            self._set_status("running", f"{names} 執行中…")
+            self._log("INFO", f"開始：{names}")
+        else:
+            self._set_status("running", f"準備執行 {total} 項任務…")
+            self._log("INFO", f"批次開始（{total} 項）：{names}")
 
         def work():
-            try:
-                result = layerstd.run(
-                    src, dst, standard, accore, recursive=recursive, overwrite=overwrite,
-                    timeout=timeout, stop_event=self.stop_event,
-                    progress=lambda i, n, cur: self.q.put(("progress", "圖層標準檢查", i, n, cur)),
-                    log=lambda level, message: self.q.put(("log", level, message)),
-                )
-            except Exception as exc:  # noqa: BLE001
-                result = dict(dwg=0, ok=0, failed=0, skipped=0, errors=0, violations=0, stopped=False,
-                              fatal=f"{type(exc).__name__}: {exc}", failed_files=[], reports={})
-                common.log_error({"output_dir": dst}, f"layerstd crashed: {result['fatal']}")
-            self.q.put(("layerstd_done", result))
+            for index, (key, params) in enumerate(prepared, 1):
+                if self.stop_event.is_set():
+                    for rest_key, _rest in prepared[index - 1:]:
+                        self.q.put(("task_skipped", rest_key, "已停止"))
+                    break
+                self.q.put(("task_start", key, index))
+
+                def log(level, message, _key=key):
+                    self.q.put(("log", level, message))
+
+                def progress(*args, _key=key):
+                    if len(args) == 4:
+                        stage, i, n, current = args
+                    else:
+                        i, n, current = args
+                        stage = TASK_LABELS[_key]
+                    self.q.put(("task_progress", _key, stage, i, n, current))
+
+                try:
+                    result = self._runners[key](params, log, progress)
+                except Exception as exc:  # noqa: BLE001
+                    result = dict(fatal=f"{type(exc).__name__}: {exc}")
+                    self._log_crash(key, params, result["fatal"])
+                self.q.put(("task_result", key, result))
+            self.q.put(("batch_done",))
 
         self.worker = threading.Thread(target=work, daemon=True)
         self.worker.start()
         self._set_busy_ui(True)
 
-    def _on_layerstd_done(self, result):
+    def _on_task_start(self, key, index):
+        batch = self._batch or dict(total=1, results=[])
+        self._batch = batch
+        total = max(1, batch["total"])
+        self.v_progress.set(100.0 * (index - 1) / total)
+        mark = f"{job_number(index)} " if total > 1 else ""
+        self.v_ptext.set(f"{index}/{total} {TASK_LABELS[key]}（0%）" if total > 1 else TASK_LABELS[key])
+        self.v_current.set("")
+        self._set_status("running", f"{index}/{total} 執行中：{TASK_LABELS[key]}" if total > 1
+                         else f"{TASK_LABELS[key]} 執行中…")
+        self._log("INFO", f"▶ {mark}{TASK_LABELS[key]} 開始")
+
+    def _on_task_progress(self, key, stage, i, n, current):
+        batch = self._batch or dict(total=1, results=[])
+        total = max(1, batch["total"])
+        index = min(total, len(batch["results"]) + 1)
+        fraction = (i / n) if n else 0.0
+        pct = 100.0 * ((index - 1) + max(0.0, min(1.0, fraction))) / total
+        self.v_progress.set(pct)
+        prefix = f"{index}/{total} " if total > 1 else ""
+        self.v_ptext.set(f"{pct:.1f}%　{prefix}{stage} {i} / {n}")
+        self.v_current.set(f"目前處理：{current}")
+
+    def _on_task_result(self, key, result):
         self.summary = result
+        if not isinstance(result, dict):
+            result = {"fatal": f"未預期的結果型別：{type(result).__name__}"}
+        try:
+            state, verdict, body = self._renderers[key](result)
+        except Exception as exc:  # noqa: BLE001 - one malformed result must not stop the queue
+            state, verdict, body = "failed", "結果無法顯示", f"錯誤：{type(exc).__name__}: {exc}"
+        batch = self._batch
+        if batch is None:
+            batch = self._batch = dict(total=1, results=[])
+        batch["results"].append((key, state, verdict, body))
+        index = len(batch["results"])
+        mark = f"{job_number(index)} " if batch["total"] > 1 else ""
+        text = f"{STATE[state]['symbol']} {STATE[state]['label']}：{verdict}\n{body}"
+        if mark:
+            text = f"{mark}{TASK_LABELS[key]}　{STATE[state]['symbol']} {STATE[state]['label']}：{verdict}\n{body}"
+        self.v_result.set(text)
+        self._set_status(state, verdict)
+        level = {"success": "OK", "warning": "WARN", "failed": "ERROR"}.get(state, "INFO")
+        self._log(level, f"{mark}{TASK_LABELS[key]}：{verdict}")
+        self._refresh_analysis_outputs()
+
+    def _on_task_skipped(self, key, reason):
+        batch = self._batch
+        if batch is None:
+            return
+        batch["results"].append((key, "skipped", reason, ""))
+        index = len(batch["results"])
+        mark = f"{job_number(index)} " if batch["total"] > 1 else ""
+        self._log("WARN", f"{mark}{TASK_LABELS[key]}：{reason}")
+
+    def _on_batch_done(self):
         self.worker = None
         self._can_stop = False
         self._set_busy_ui(False)
-        if result.get("dwg", 0) == 0 and not result.get("fatal") and not result.get("stopped"):
-            state, verdict = "warning", "沒有找到 DWG / DXF"
-        else:
-            state, verdict = classify_outcome(result)
-            if state == "success" and result.get("violations"):
-                state, verdict = "warning", "檢查完成，有圖層不符合標準"
-        failed_files = result.get("failed_files", [])
-        shown = "\n".join(f"  - {friendly_failure(x)}" for x in failed_files[:8])
-        if len(failed_files) > 8:
-            shown += f"\n  ... 另有 {len(failed_files) - 8} 個（見 layer_check_summary.csv）"
-        st = STATE[state]
-        self.v_result.set(
-            f"{st['symbol']} {st['label']}：{verdict}\n"
-            f"檔案：{result.get('dwg', 0)}　已檢查：{result.get('ok', 0)}　失敗：{result.get('failed', 0)}\n"
-            f"違規：{result.get('violations', 0)}（錯誤 {result.get('errors', 0)}）\n"
-            f"報告：layer_check/layer_check_report.html"
-            + (f"\n錯誤：{result['fatal']}" if result.get("fatal") else "")
-            + (f"\n\n失敗檔案：\n{shown}" if failed_files else "")
-        )
-        self._set_status(state, verdict)
-        if not result.get("fatal") and not result.get("stopped"):
+        batch = self._batch or dict(total=0, results=[])
+        self._batch = None
+        results = batch["results"]
+        stopped = self.stop_event.is_set()
+        if not results:
+            self._set_status("warning", "沒有執行任何任務")
+            self.v_result.set("– 略過：沒有執行任何任務")
+            return
+        if batch.get("total", 1) <= 1:
+            key, state, verdict, body = results[0]
+            self.v_result.set(f"{STATE[state]['symbol']} {STATE[state]['label']}：{verdict}\n{body}")
+            self._set_status(state, verdict)
+            if not stopped:
+                self.v_progress.set(100)
+            self._reveal(self.result_frame)
+            return
+        worst = max((item[1] for item in results), key=lambda value: SEVERITY.get(value, 0))
+        stopped = any(item[1] == "skipped" and item[2] == "已停止" for item in results)
+        state = "warning" if stopped else worst
+        done = sum(1 for item in results if item[1] != "skipped")
+        heads = {
+            "failed": f"批次結束，有任務失敗（共 {len(results)} 項）",
+            "warning": f"批次完成，部分任務需要檢視（共 {len(results)} 項）",
+            "skipped": f"批次完成（結果都已存在，共 {len(results)} 項）",
+            "success": f"批次完成（{len(results)} 項任務）",
+        }
+        head = (f"已停止：完成 {done} / {batch.get('total', len(results))} 項任務"
+                if stopped else heads.get(state, f"批次完成（{len(results)} 項任務）"))
+        lines = [f"{STATE[state]['symbol']} {STATE[state]['label']}：{head}"]
+        for index, (key, task_state, verdict, _body) in enumerate(results, 1):
+            lines.append(f"{job_number(index)} {TASK_LABELS[key]}：{STATE[task_state]['symbol']} "
+                         f"{STATE[task_state]['label']}　{verdict}")
+        lines.append("")
+        for index, (key, _task_state, _verdict, body) in enumerate(results, 1):
+            if not body:
+                continue
+            lines.append(f"──── {job_number(index)} {TASK_LABELS[key]} ────")
+            lines.append(body)
+        self.v_result.set("\n".join(lines))
+        self._set_status(state, head)
+        self._log("WARN" if state in ("warning", "failed") else "OK", f"批次結束：{head}")
+        if not stopped:
             self.v_progress.set(100)
-        self._refresh_analysis_outputs()
         self._reveal(self.result_frame)
 
     # ---------- run ----------
@@ -1704,73 +1617,16 @@ class App:
         return self.worker is not None and self.worker.is_alive()
 
     def _start(self):
-        if self._busy():
-            return
-        if not self.env_ok:
-            messagebox.showerror("無法處理 DWG", "找不到可用的 accoreconsole；請先完成環境設定並重新檢查。")
-            return
-        cfg = self._current_cfg()
-        if not Path(cfg["input_dir"]).is_dir():
-            messagebox.showerror("輸入資料夾不存在", cfg["input_dir"])
-            return
-        if not cfg["output_dir"]:
-            messagebox.showerror("請指定輸出資料夾", "")
-            return
-        if not cfg["keywords"] and self.opts["scada"].get():
-            messagebox.showwarning("沒有關鍵字", "SCADA 搜尋需要至少一個關鍵字")
-            return
-        opts = {k: v.get() for k, v in self.opts.items()}
-        self.stop_event.clear()
-        self._can_stop = True
-        self.v_progress.set(0)
-        self.v_ptext.set("")
-        self.v_result.set("處理中...")
-        self._set_status("running", "DWG 轉 DXF＋解析中…")
-        self.root.after(50, self._refresh_analysis_outputs)   # output buttons stay disabled while a run is active
-
-        def work():
-            try:
-                s = pipeline.run_pipeline(
-                    cfg, opts,
-                    log=lambda lv, m: self.q.put(("log", lv, m)),
-                    progress=lambda st, i, n, cur: self.q.put(("progress", st, i, n, cur)),
-                    stop_event=self.stop_event)
-            except Exception as e:  # noqa: BLE001
-                s = dict(dwg=0, ok=0, failed=0, dxf=0, keyword_hits=0, unique_objects=0, suspect_texts=0, elapsed=0, stopped=False,
-                         fatal=f"{type(e).__name__}: {e}")
-                common.log_error(cfg, f"pipeline crashed: {s['fatal']}")
-            self.q.put(("done", s))
-        self.worker = threading.Thread(target=work, daemon=True)
-        self.worker.start()
-        self._set_busy_ui(True)
+        self._start_tasks(["dwg"])
 
     def _stop(self):
         self.stop_event.set()
         self.btn_stop.configure(state="disabled")
-        self._log("WARN", "停止中：等待目前的 accoreconsole 結束...")
+        self._log("WARN", "停止中：目前任務結束後停止...")
 
     def _on_done(self, s):
-        self.summary = s
-        self.worker = None      # the worker has finished; lets the output buttons enable
-        self._can_stop = False
-        self._set_busy_ui(False)
-        state, verdict = classify_outcome(s)
-        head = f"{STATE[state]['symbol']} {STATE[state]['label']}：{verdict}"
-        if not s["fatal"] and not s["stopped"]:
-            self.v_progress.set(100)
-        failed_files = s.get("failed_files", [])
-        shown = "\n".join(f"  - {friendly_failure(x)}" for x in failed_files[:8])
-        if len(failed_files) > 8:
-            shown += f"\n  ... 另有 {len(failed_files) - 8} 個（見 errors.log）"
-        self.v_result.set(
-            f"{head}\n\nDWG：{s['dwg']}\n成功：{s['ok']}\n失敗：{s['failed']}\n略過：{s.get('skipped', 0)}\n"
-            f"分析失敗：{s.get('analyze_failed', 0)}\nDXF：{s['dxf']}\n"
-            f"Keyword Hits：{s['keyword_hits']}\nUnique Matched Objects：{s['unique_objects']}\n"
-            f"Suspect text records：{s['suspect_texts']}\n耗時：{pipeline.fmt_duration(s['elapsed'])}"
-            + (f"\n錯誤：{s['fatal']}" if s["fatal"] else "")
-            + (f"\n\n失敗檔案：\n{shown}" if failed_files else ""))
-        self._set_status(state, verdict)
-        self._reveal(self.result_frame)
+        """Compatibility entry point: render one finished DWG result without a worker."""
+        self._show_finished("dwg", s)
 
     def _poll(self):
         try:
@@ -1779,84 +1635,21 @@ class App:
                 k = m[0]
                 if k == "log":
                     self._log(m[1], m[2])
-                elif k == "progress":
-                    _, stage, i, n, cur = m
-                    pct = 100.0 * i / n if n else 0
-                    self.v_progress.set(pct)
-                    self.v_ptext.set(f"{pct:.1f}%　{stage} {i} / {n}")
-                    self.v_current.set(f"目前處理：{cur}")
-                elif k == "done":
-                    self._on_done(m[1])
-                elif k == 'analysis_done':
-                    self._analysis_done(m[1])
-                elif k == "fontfix_done":
-                    self._on_fontfix_done(m[1])
-                elif k == "extract_done":
-                    self._on_extract_done(m[1])
-                elif k == "replace_done":
-                    self._on_replace_done(m[1])
-                elif k == "tb_read_done":
-                    self._on_tb_read_done(m[1])
-                elif k == "tb_write_done":
-                    self._on_tb_write_done(m[1])
-                elif k == "layer_done":
-                    self._on_layer_done(m[1])
-                elif k == "layerstd_done":
-                    self._on_layerstd_done(m[1])
-                elif k == "diff_done":
-                    self._on_diff_done(m[1])
+                elif k == "task_start":
+                    self._on_task_start(m[1], m[2])
+                elif k == "task_progress":
+                    _, key, stage, i, n, cur = m
+                    self._on_task_progress(key, stage, i, n, cur)
+                elif k == "task_result":
+                    self._on_task_result(m[1], m[2])
+                elif k == "task_skipped":
+                    self._on_task_skipped(m[1], m[2])
+                elif k == "batch_done":
+                    self._on_batch_done()
                 elif k == "env_paths":
                     self._on_env_paths(m[1], m[2])
                 elif k == "env":
                     self._on_env(m[1])
-                elif k == "scan":
-                    r = m[1]
-                    self.worker = None
-                    self._can_stop = False
-                    self._set_busy_ui(False)
-                    self.v_scan.set(
-                        f"找到 DWG：{r['dwg']}｜DXF：{r['dxf']}｜總容量：{pipeline.fmt_size(r['size'])}｜"
-                        f"資料夾：{r['folders']}｜中文檔名：{r['chinese']}｜空白路徑：{r['spaces']}｜"
-                        f"重複檔名：{r['duplicates']}")
-                    total = r['dwg'] + r['dxf']
-                    self.v_result.set(f"✓ 成功：掃描完成\n檔案：{total}　DWG：{r['dwg']}　DXF：{r['dxf']}　資料夾：{r['folders']}")
-                    self._set_status("success", "掃描完成")
-                    self.v_progress.set(100)
-                    self._log("INFO", self.v_scan.get())
-                    self._reveal(self.result_frame)
-                elif k == "scan_err":
-                    self.worker = None
-                    self._can_stop = False
-                    self._set_busy_ui(False)
-                    self.v_scan.set("")
-                    self.v_result.set(f"✗ 失敗：掃描失敗\n錯誤：{m[1]}")
-                    self._set_status("failed", "掃描失敗")
-                    messagebox.showerror("掃描失敗", m[1])
-                elif k == "versions_done":
-                    _, csv_path, total, ok, unknown, invalid, dwt = m
-                    self.worker = None
-                    self._can_stop = False
-                    self._set_busy_ui(False)
-                    self.v_scan.set(
-                        f"版本表完成：{total} 檔（DWT {dwt}）｜已辨識：{ok}｜未知代碼：{unknown}｜異常：{invalid}")
-                    state = "warning" if unknown or invalid else "success"
-                    self.v_result.set(
-                        f"{STATE[state]['symbol']} {STATE[state]['label']}：版本表完成\n"
-                        f"檔案：{total}　已辨識：{ok}　未知代碼：{unknown}　異常：{invalid}　DWT：{dwt}")
-                    self._set_status(state, "版本表完成")
-                    self.v_progress.set(100)
-                    self._log("OK", f"DWG/DWT 版本表已輸出：{csv_path}")
-                    self._refresh_analysis_outputs()
-                    self._reveal(self.result_frame)
-                elif k == "versions_err":
-                    self.worker = None
-                    self._can_stop = False
-                    self._set_busy_ui(False)
-                    self.v_scan.set("")
-                    self.v_result.set(f"✗ 失敗：版本表失敗\n錯誤：{m[1]}")
-                    self._set_status("failed", "版本表失敗")
-                    self._log("ERROR", f"DWG/DWT 版本表失敗：{m[1]}")
-                    messagebox.showerror("版本表失敗", m[1])
         except queue.Empty:
             pass
         self.root.after(100, self._poll)

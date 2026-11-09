@@ -50,7 +50,7 @@ def test_mode_defaults_and_environment_gating(monkeypatch, tk_root):
     assert a.log_frame.winfo_manager()
     original_convert = a.opts["convert"].get()
     original_keywords = a._keywords()
-    for mode in ("scan", "analysis", "version", "fontfix", "layerclass", "textextract", "textreplace", "dwg"):
+    for mode in ("scan", "analysis", "version", "fontfix", "proxygraphics", "layerclass", "textextract", "textreplace", "dwg"):
         a.v_mode.set(mode)
         a._refresh_mode_ui()
         assert a.mode_frames[mode].winfo_manager()
@@ -71,6 +71,272 @@ def test_mode_defaults_and_environment_gating(monkeypatch, tk_root):
     a.v_mode.set("analysis")
     a._refresh_mode_ui()
     assert str(a.btn_analysis["state"]) == "normal"       # non-DWG analysis stays available
+
+
+def test_mode_picker_uses_checkbuttons_and_shows_every_checked_task(monkeypatch, tk_root):
+    """② 我要做什麼？ is multi-select: every checked task keeps its own settings visible."""
+    import app as appmod
+    monkeypatch.setattr(appmod.App, "_check_env", lambda self: None)
+    _fresh(tk_root)
+    a = appmod.App(tk_root)
+    assert a.mode_buttons and all(button.winfo_class() == "TCheckbutton" for button in a.mode_buttons)
+    assert a._selected_modes() == ["version"]                  # same safe default as before
+    assert str(a.btn_run_selected["state"]) == "normal"       # version headers do not need AutoCAD
+
+    for key in ("scan", "version", "analysis"):
+        a.v_modes[key].set(True)
+        a._on_mode_toggle(key)
+    assert a._selected_modes() == ["scan", "version", "analysis"]
+    assert sum(bool(frame.winfo_manager()) for frame in a.mode_frames.values()) == 3
+    assert a.v_mode.get() == "analysis"                        # most recently checked task
+    assert "（3）" in a.btn_run_selected["text"]
+    assert str(a.btn_run_selected["state"]) == "normal"
+
+    a.v_modes["fontfix"].set(True)
+    a._on_mode_toggle("fontfix")
+    assert str(a.btn_run_selected["state"]) == "disabled"     # fontfix needs accoreconsole
+    a.v_modes["fontfix"].set(False)
+    a._on_mode_toggle("fontfix")
+    assert str(a.btn_run_selected["state"]) == "normal"
+
+    for key in a._selected_modes():
+        a.v_modes[key].set(False)
+        a._on_mode_toggle(key)
+    assert a._selected_modes() == []
+    assert a.mode_empty.winfo_manager()
+    assert str(a.btn_run_selected["state"]) == "disabled"
+
+
+def test_select_all_and_clear_all_buttons(monkeypatch, tk_root):
+    """全選 / 全不選 refresh the checkboxes, ③, the start-button count and the order hint immediately."""
+    import app as appmod
+    monkeypatch.setattr(appmod.App, "_check_env", lambda self: None)
+    _fresh(tk_root)
+    a = appmod.App(tk_root)
+    a.env_ok = True
+    a._set_busy_ui(False)
+    assert str(a.btn_select_all["state"]) == "normal"
+
+    a.btn_select_all.invoke()
+    assert a._selected_modes() == [key for key, _label in appmod.TASKS]
+    assert all(var.get() for var in a.v_modes.values())
+    assert sum(bool(frame.winfo_manager()) for frame in a.mode_frames.values()) == 9
+    assert a.btn_run_selected["text"] == "開始所選任務（9）"
+    assert all(label in a.lbl_selection["text"] for _key, label in appmod.TASKS)
+    assert str(a.btn_run_selected["state"]) == "normal"
+
+    a._set_busy_ui(True)                                     # both buttons lock during a run
+    assert str(a.btn_select_all["state"]) == "disabled"
+    assert str(a.btn_clear_all["state"]) == "disabled"
+    a._set_busy_ui(False)
+
+    a.btn_clear_all.invoke()
+    assert a._selected_modes() == []
+    assert not any(var.get() for var in a.v_modes.values())
+    assert not any(frame.winfo_manager() for frame in a.mode_frames.values())
+    assert a.mode_empty.winfo_manager()
+    assert "請至少勾選一項任務" in a.lbl_selection["text"]
+    assert str(a.btn_run_selected["state"]) == "disabled"
+    assert a.btn_run_selected["text"] == "開始所選任務"
+
+    a.v_modes["textextract"].set(True)                       # single selection still works after 全不選
+    a._on_mode_toggle("textextract")
+    assert a._selected_modes() == ["textextract"]
+    assert a.mode_frames["textextract"].winfo_manager()
+    assert a.btn_run_selected["text"] == "開始所選任務（1）"
+
+
+def test_selected_tasks_run_in_order_and_share_one_summary(monkeypatch, tk_root, tmp_path):
+    import app as appmod
+    monkeypatch.setattr(appmod.App, "_check_env", lambda self: None)
+    _fresh(tk_root)
+    a = appmod.App(tk_root)
+    a.v_in.set(str(tmp_path))
+    a.v_out.set(str(tmp_path / "out"))
+    calls = []
+
+    def fake_scan(path, recursive=True):
+        calls.append(("scan", recursive))
+        return dict(dwg=3, dxf=1, size=1024, folders=2, chinese=1, spaces=0, duplicates=0)
+
+    def fake_versions(inputs, csv_path, recursive=True):
+        calls.append(("version", recursive))
+        return [dict(status="OK", extension=".dwg"), dict(status="OK", extension=".dwt")]
+
+    monkeypatch.setattr(appmod.pipeline, "scan", fake_scan)
+    monkeypatch.setattr(appmod.dwg_version, "write_version_csv", fake_versions)
+    for key in ("version", "scan"):
+        a.v_modes[key].set(True)
+        a._on_mode_toggle(key)
+    assert a._selected_modes() == ["scan", "version"]          # UI order, not click order
+    a._start_selected()
+    deadline = time.time() + 15
+    while a._batch is not None and time.time() < deadline:
+        tk_root.update()
+        time.sleep(0.01)
+    assert calls == [("scan", True), ("version", True)]
+    text = a.v_result.get()
+    assert "批次完成（2 項任務）" in text
+    assert "① 掃描資料夾" in text and "② DWG / DWT 版本表" in text
+    assert "檔案：4" in text and "DWT：1" in text
+    assert a.v_progress.get() == 100
+    assert str(a.btn_run_selected["state"]) == "normal"
+
+
+def test_batch_skips_only_the_invalid_tasks(monkeypatch, tk_root, tmp_path):
+    import app as appmod
+    monkeypatch.setattr(appmod.App, "_check_env", lambda self: None)
+    _fresh(tk_root)
+    a = appmod.App(tk_root)
+    a.v_in.set(str(tmp_path))
+    a.v_out.set(str(tmp_path / "out"))
+    warnings = []
+    monkeypatch.setattr(appmod.messagebox, "showwarning", lambda title, msg: warnings.append((title, msg)))
+    monkeypatch.setattr(appmod.messagebox, "showerror",
+                        lambda title, msg: (_ for _ in ()).throw(AssertionError(f"unexpected error: {title}: {msg}")))
+    calls = []
+
+    def fake_versions(inputs, csv_path, recursive=True):
+        calls.append(recursive)
+        return [dict(status="OK", extension=".dwg")]
+
+    monkeypatch.setattr(appmod.dwg_version, "write_version_csv", fake_versions)
+    for key in ("version", "fontfix"):
+        a.v_modes[key].set(True)
+        a._on_mode_toggle(key)
+    assert not a.env_ok                                     # fontfix cannot be prepared
+    a._start_selected()
+    deadline = time.time() + 15
+    while a._batch is not None and time.time() < deadline:
+        tk_root.update()
+        time.sleep(0.01)
+    assert warnings and "缺字體修復" in warnings[0][1] and "accoreconsole" in warnings[0][1]
+    assert calls == [True]                                  # only the valid task ran
+    assert "版本表完成" in a.v_result.get()
+
+
+def test_stopping_a_batch_skips_the_tasks_that_did_not_start(monkeypatch, tk_root, tmp_path):
+    import app as appmod
+    monkeypatch.setattr(appmod.App, "_check_env", lambda self: None)
+    _fresh(tk_root)
+    a = appmod.App(tk_root)
+    a.env_ok = True
+    folder = tmp_path / "in"
+    folder.mkdir()
+    a.v_in.set(str(folder))
+    a.v_out.set(str(tmp_path / "out"))
+    a._set_busy_ui(False)
+    calls = []
+
+    def fake_pipeline(cfg, opts, **kwargs):
+        calls.append(dict(opts))
+        kwargs["stop_event"].set()                          # user pressed stop during the first task
+        return dict(dwg=1, ok=1, failed=0, skipped=0, failed_files=[], analyze_failed=0,
+                    dxf=1, keyword_hits=0, unique_objects=0, suspect_texts=0, elapsed=0.1,
+                    stopped=True, fatal="")
+
+    monkeypatch.setattr(appmod.pipeline, "run_pipeline", fake_pipeline)
+    a.v_modes["version"].set(False)
+    a._on_mode_toggle("version")                            # drop the default task for this test
+    for key in ("dwg", "analysis"):
+        a.v_modes[key].set(True)
+        a._on_mode_toggle(key)
+    a._start_selected()
+    deadline = time.time() + 15
+    while a._batch is not None and time.time() < deadline:
+        tk_root.update()
+        time.sleep(0.01)
+    text = a.v_result.get()
+    assert "已停止：完成 1 / 2 項任務" in text
+    assert "② 工程資料分析：– 略過　已停止" in text
+    assert len(calls) == 1 and not calls[0].get("multiformat")   # the queued analysis never started
+
+
+
+def test_all_nine_tasks_run_in_one_batch(monkeypatch, tk_root, tmp_path):
+    """Every task keeps its own validation and result rendering when they share one batch."""
+    import app as appmod
+    monkeypatch.setattr(appmod.App, "_check_env", lambda self: None)
+    _fresh(tk_root)
+    a = appmod.App(tk_root)
+    a.env_ok = True
+    inp = tmp_path / "in"
+    inp.mkdir()
+    a.v_in.set(str(inp))
+    a.v_out.set(str(tmp_path / "out"))
+    a.v_tx_pattern.set("W12")
+    a.v_rp_find.set("W12")
+    a.v_rp_repl.set("W13")
+    a._set_busy_ui(False)
+    calls, captured = [], {}
+
+    monkeypatch.setattr(appmod.pipeline, "scan",
+                        lambda path, recursive=True: (calls.append("scan") or dict(
+                            dwg=1, dxf=0, size=10, folders=1, chinese=0, spaces=0, duplicates=0)))
+    monkeypatch.setattr(appmod.dwg_version, "write_version_csv",
+                        lambda *args, **kwargs: (calls.append("version") or [dict(status="OK", extension=".dwg")]))
+
+    def fake_fontfix(*args, **kwargs):
+        calls.append("fontfix")
+        return dict(dwg=1, ok=1, failed=0, skipped=0, warnings=0, styles_replaced=0,
+                    stopped=False, fatal="", failed_files=[], still_files=[], elapsed=0.1)
+
+    def fake_proxy(*args, **kwargs):
+        calls.append("proxygraphics")
+        return dict(dwg=1, ok=1, failed=0, skipped=0, warnings=0,
+                    stopped=False, fatal="", failed_files=[], elapsed=0.1)
+
+    def fake_extract(*args, **kwargs):
+        calls.append("textextract")
+        captured["extract"] = kwargs
+        return dict(dwg=1, ok=1, failed=0, skipped=0, warnings=0, hits=2,
+                    stopped=False, fatal="", failed_files=[], elapsed=0.1)
+
+    def fake_replace(*args, **kwargs):
+        calls.append("textreplace")
+        captured["replace"] = kwargs
+        return dict(dwg=1, ok=1, failed=0, skipped=0, warnings=0, changes=1, unchanged=0,
+                    stopped=False, fatal="", failed_files=[], elapsed=0.1)
+
+    def fake_layer(*args, **kwargs):
+        calls.append("layerclass")
+        return dict(dwg=1, ok=1, failed=0, skipped=0, warnings=0, moved=1, created=1,
+                    unchanged=0, stopped=False, fatal="", failed_files=[], notes=[], elapsed=0.1)
+
+    def fake_pipeline(cfg, opts, **kwargs):
+        if opts.get("multiformat"):
+            calls.append("analysis")
+            return dict(total=1, ok=1, failed=0, skipped=0, warnings=0, fatal="",
+                        stopped=False, failed_files=[])
+        calls.append("dwg")
+        return dict(dwg=1, ok=1, failed=0, skipped=0, failed_files=[], analyze_failed=0,
+                    dxf=1, keyword_hits=0, unique_objects=0, suspect_texts=0, elapsed=0.1,
+                    stopped=False, fatal="")
+
+    monkeypatch.setattr(appmod.fontfix_batch, "run", fake_fontfix)
+    monkeypatch.setattr(appmod.proxybatch, "run", fake_proxy)
+    monkeypatch.setattr(appmod.textbatch, "run_extract", fake_extract)
+    monkeypatch.setattr(appmod.textbatch, "run_replace", fake_replace)
+    monkeypatch.setattr(appmod.layerbatch, "run", fake_layer)
+    monkeypatch.setattr(appmod.pipeline, "run_pipeline", fake_pipeline)
+
+    for key, _label in appmod.TASKS:
+        a.v_modes[key].set(True)
+        a._on_mode_toggle(key)
+    assert len(a._selected_modes()) == 9
+    a._start_selected()
+    deadline = time.time() + 20
+    while a._batch is not None and time.time() < deadline:
+        tk_root.update()
+        time.sleep(0.01)
+    assert calls == [key for key, _label in appmod.TASKS]
+    assert captured["extract"]["pattern"] == "W12"
+    assert captured["replace"]["find"] == "W12" and captured["replace"]["repl"] == "W13"
+    text = a.v_result.get()
+    assert "批次完成（9 項任務）" in text
+    for _key, label in appmod.TASKS:
+        assert label in text
+    assert a.v_progress.get() == 100
 
 
 def test_primary_result_selection(tmp_path):
@@ -95,6 +361,10 @@ def test_primary_result_selection(tmp_path):
     fontfix_csv.parent.mkdir(parents=True, exist_ok=True)
     fontfix_csv.touch()
     assert appmod.get_primary_result("fontfix", out) == fontfix_csv
+
+    proxy_csv = out / "logs" / "proxygraphics_results.csv"
+    proxy_csv.touch()
+    assert appmod.get_primary_result("proxygraphics", out) == proxy_csv
 
     hits = out / "logs" / "textextract_hits.csv"
     hits.touch()
@@ -222,13 +492,13 @@ def test_gui_smoke(env, tk_root):
             time.sleep(0.05)
         assert a.env_ok and str(a.btn_start["state"]) == "normal"
         a._scan()
-        while "找到 DWG：3" not in a.v_scan.get() and time.time() < deadline:
+        while ("找到 DWG：3" not in a.v_scan.get() or a._busy() or a._batch is not None) and time.time() < deadline:
             root.update()
             time.sleep(0.05)
         assert "找到 DWG：3" in a.v_scan.get()
         a._start()
         assert str(a.btn_stop["state"]) == "normal"
-        while a.summary is None and time.time() < deadline + 120:
+        while (a.summary is None or a._busy() or a._batch is not None) and time.time() < deadline + 120:
             root.update()
             time.sleep(0.05)
         assert a.summary and a.summary["ok"] == 2 and a.summary["failed"] == 1

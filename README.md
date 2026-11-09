@@ -5,7 +5,7 @@
 
 | 項目 | 狀態 |
 | --- | --- |
-| 自動化測試 | 276 collected。無 AutoCAD 的環境為 254 passed / 22 skipped（含缺字體修復、自動分圖層、文字擷取／取代；`accore` 測試在 AutoCAD 2027 上才會執行） |
+| 自動化測試 | 325 collected。本機（AutoCAD 2027）全數通過；無 AutoCAD 的環境為 301 passed / 24 skipped（`accore` 測試會自動略過） |
 | Real project validation | SB12 Round 1 FAIL（v1.5）→ Round 2 PASS（P0 修正，v1.5.1）→ Round 3 PASS（P1 evidence metadata，v1.5.2）；見 [docs/REAL_PROJECT_VALIDATION_STATUS.md](docs/REAL_PROJECT_VALIDATION_STATUS.md) |
 | Production Approval | NOT APPROVED |
 | 版本標籤 | `v1.6.0`（前版 `v1.5.2`、`v1.5.1`、`v1.5-semantic-validation-candidate`） |
@@ -57,32 +57,53 @@ GUI log 寫入 `output\logs\gui.log`。掃描不會執行 AutoCAD、不修改任
 「產生 CSV」控制 analyze 的 CSV；`scada_hits.csv` 只要勾選「SCADA 關鍵字搜尋」就會產生。
 
 ### 同時處理數（並行）
-「① 基本設定」的「同時處理數」決定同時開幾個 `accoreconsole`（1–8，預設為 CPU 邏輯核心數的一半、最多 4；寫進 `config.json` 的 `workers`）。DWG 轉 DXF、缺字體修復、文字擷取／取代、自動分圖層都會把檔案輪流分給這幾個程序同時處理；每個程序內仍是一次開多張圖，啟動成本只付一次。
+> **狀態**：後端已整合，GUI 尚未接線，目前沒有介面上的「同時處理數」欄位。`config.json` 的 `workers`（1–8，預設 1，即原本的單一 accoreconsole 行為）目前只由 `scripts\batch_convert.py` 讀取；缺字體修復、文字擷取／取代、自動分圖層的 `workers=` 參數預設為 1，需以程式呼叫指定。
+
+`workers` 決定同時開幾個 `accoreconsole`。檔案會輪流分給這幾個程序同時處理；每個程序內仍是一次開多張圖，啟動成本只付一次。
 - 結果 CSV／JSONL 仍是一檔一列；DWG 轉 DXF 與缺字體修復是做完一張寫一列，所以列的順序可能和檔案順序不同。
 - 「停止」會同時中止所有程序。
 - 數字越大越快，但每個 `accoreconsole` 都會吃記憶體；大圖建議 2–3。
 
+### 多任務批次（可同時勾選多項）
+「② 我要做什麼？」是核取方塊，可以同時勾選多項任務；「③ 任務設定」會把勾選的任務全部展開。按「開始所選任務（N）」會依畫面順序依序執行：掃描資料夾 → DWG / DWT 版本表 → 缺字體修復 → Revit 代理圖形 → 自動分圖層 → 文字擷取 → 文字取代 → DWG 轉 DXF + 解析 → 工程資料分析。
+
+- 開始前會先檢查所有勾選任務的設定；設定不完整的任務會列在提示中並略過，其餘任務照常執行。若全部都不完整，則不會啟動任何任務。
+- 勾選區下方有「全選」與「全不選」：按「全選」會一次勾選全部 9 項，按「全不選」會全部取消並停用開始按鈕；按下的同時，③ 的設定區塊、開始按鈕上的任務數與執行順序都會立即更新。
+- 「掃描資料夾」、「DWG / DWT 版本表」、「工程資料分析」不需要 AutoCAD。只勾這幾項時，即使找不到 `accoreconsole` 也可以按「開始所選任務」。
+- 批次只有一個背景 worker，任務一項接一項執行；「停止」會在目前任務結束後停止，尚未開始的任務在結果中標示為「略過（已停止）」。
+- 結果區會列出每一項任務的狀態（成功／略過／警告／失敗）與各自的摘要；「開啟主要結果」會開啟最後一項有輸出檔的任務結果。
+- 各任務區塊下方的「開始…」按鈕仍然只執行該項任務；預設勾選「DWG / DWT 版本表」。
+
 ### DWG / DWT 版本表（免 AutoCAD、免管理員）
-來源區的「產生 DWG/DWT 版本表」會直接唯讀檔案前 6 bytes 的 `ACxxxx` header，輸出 `output/csv/dwg_versions.csv`。
+② 勾選「DWG / DWT 版本表」後按「開始所選任務」，會直接唯讀檔案前 6 bytes 的 `ACxxxx` header，輸出 `output/csv/dwg_versions.csv`。
 - 支援 `.dwg` 與 `.dwt`；DWT 使用相同的 DWG header 判讀方式。
 - 不啟動 AutoCAD、不安裝 Shell Extension、不寫 Windows Registry、不需要系統管理員權限。
 - 欄位：`file`、`extension`、`format_code`、`format`、`status`。
 - `format` 直接以「`ACxxxx`→西元年」顯示，一眼看懂版本與年份；例如 `AC1032` 顯示為 `AC1032→2018`。
 - 未知的新 `ACxxxx` 代碼會保留原碼並標記 `UNKNOWN_CODE`，不會猜測版本。
 
+### Revit 代理圖形（PROXYGRAPHICS=1）
+
+「② 我要做什麼？」勾選「Revit 代理圖形」。工具會把每個 DWG 複製到暫存檔，透過 `accoreconsole` 設定 `PROXYGRAPHICS=1`、讀回確認後 `QSAVE`，再把完成檔寫入輸出資料夾。
+
+- 原始 DWG 不會被修改，也不會執行 `EXPLODE`；Cable Tray 等 MEP 物件仍保留為原物件。
+- 可包含子資料夾；輸出會保留相同的相對路徑。既有輸出預設略過，可勾選覆寫。
+- 結果寫入 `logs/proxygraphics_results.csv`、`.jsonl` 與 `proxygraphics.log`。
+- 這個設定只讓 DWG 儲存代理外觀；如果來源圖已經被炸開或已沒有 Cable Tray 物件，無法用此功能還原。
+
 ### 缺字體修復
-「② 我要做什麼？」選擇「缺字體修復」。使用上方的輸入／輸出資料夾（兩者不可相同，輸出也不可放在輸入裡面），按「開始修復字體」。
-每個 DWG 會先整檔複製到暫存檔再交給 `accoreconsole` 開啟，所以原始圖不會被改寫；正在 AutoCAD 裡開啟的圖只要還能讀取，也會用複本處理。勾選「包含子資料夾」時，輸出保留相同的資料夾結構。
+「② 我要做什麼？」勾選「缺字體修復」。使用上方的輸入／輸出資料夾（兩者不可相同，輸出也不可放在輸入裡面），按「開始修復字體」。
+每個 DWG 與 DWT（大小寫不分，`.DWT` 也算）會先整檔複製到暫存檔再交給 `accoreconsole` 開啟，所以原始圖不會被改寫；正在 AutoCAD 裡開啟的圖只要還能讀取，也會用複本處理。勾選「包含子資料夾」時，輸出保留相同的資料夾結構。樣板的輸出副檔名維持 `.dwt` / `.DWT`，不會改存成 `.dwg`。暫存檔一律用 `.dwg`：AutoCAD 對 `.dwt` 執行 OPEN 會從樣板另開新圖，而不是編輯該檔。
 
 替換規則與已在 AutoCAD 2027 驗證過的 FONTFIX 原型相同：
 - 逐一讀取文字樣式的主字體（DXF group 3）與大字體（DXF group 4）。
 - 字體算「找不到」必須同時失敗：AutoCAD 支援路徑（`findfile`）、`%WINDIR%\Fonts`、`%LOCALAPPDATA%\Microsoft\Windows\Fonts`，以及（`.ttf/.ttc/.otf`）登錄的 TrueType 字型名稱。AutoCAD 會把已安裝字型記成 `Microsoft JhengHei.ttf`，實際檔案卻是 `msjh.ttc`，所以不能只比檔名。
-- 沒有副檔名（例如 `txt`、`genie`）當成 `.shx`。`@` 開頭的直排字體略過。
+- 沒有副檔名（例如 `txt`、`genie`、`@chinaset`）當成 `.shx`。`@` 開頭的 TrueType 直排字體略過；`@` 開頭的 SHX 仍會查檔，缺少時照常替換。
 - 找不到的主字體改成預設主字體（預設 `romans.shx`），找不到的大字體改成預設大字體（預設 `chineset.shx`）。「字體對照」可寫 `舊字體=新字體`，每行一筆，大小寫不分。已安裝的字體不動。
 - 存檔前再檢查一次，仍然找不到的樣式寫進結果。
 
 結果在輸出資料夾的 `logs\`：
-- `fontfix_results.csv`：每個 DWG 一列（檔案、狀態、替換明細、仍缺字、錯誤）。
+- `fontfix_results.csv`：每個 DWG / DWT 一列（檔案、狀態、替換明細、仍缺字、錯誤）。
 - `fontfix_results.jsonl`：同一批結果的結構化內容。
 - `fontfix.log`：繁中文字紀錄（替換了哪個樣式、舊字體、新字體）。
 - `fontfix_batch_*.stdout.log`：該次 accoreconsole 的主控台輸出。
@@ -94,16 +115,16 @@ GUI log 寫入 `output\logs\gui.log`。掃描不會執行 AutoCAD、不修改任
 修復結果用 `|=|` 分隔欄位。accoreconsole 會把 LISP 印出的定位字元（tab）展開成不定數量的空白，空的大字體欄位會消失，含空白的字型名稱（例如 `Microsoft JhengHei.ttf`）也會被切碎。用定位字元解析時，三張圖都會變成「沒有收到修復結果」，暫存 DWG 也不會搬進輸出資料夾。解析器仍讀得懂舊的定位字元，以及這次實測留下的空白分隔輸出。
 
 本機確認（Windows、AutoCAD 2027，不是 LT）：
-1. 選「缺字體修復」，輸入資料夾放含缺字 SHX 的 DWG，輸出選另一個資料夾。可讓其中一個 DWG 維持在 AutoCAD 開啟。
+1. 勾選「缺字體修復」，輸入資料夾放含缺字 SHX 的 DWG，並放至少一個 `.dwt` 與一個 `.DWT`。輸出選另一個資料夾。可讓其中一個檔案維持在 AutoCAD 開啟。
 2. 維持預設 `romans.shx`／`chineset.shx`，可加一筆對照（例如 `sino2.shx=txt.shx`），勾選子資料夾後開始。
 3. 進度會逐檔前進。原始檔時間與內容不變，被開啟的那張圖也沒被存回。
-4. 輸出的 DWG 在 AutoCAD 2027（zh-TW）打開時，被替換的樣式不再跳缺字；`Microsoft JhengHei.ttf`、`arial.ttf`、`txt` 與 `@` 開頭的樣式維持原樣。
+4. 輸出的 DWG 在 AutoCAD 2027（zh-TW）打開時，被替換的樣式不再跳缺字；`Microsoft JhengHei.ttf`、`arial.ttf`、`txt` 與已安裝的 `@` 開頭字型維持原樣。輸出的樣板檔名仍是 `.dwt` / `.DWT`（不會多出同名 `.dwg`），開啟後仍可當樣板，樣式替換與 DWG 相同。
 5. `logs\fontfix_results.csv` 與 `fontfix.log` 有舊字體 → 新字體，以及存檔後仍缺字的樣式。
-6. 「另存版本」選 AutoCAD 2013，再用「DWG / DWT 版本表」確認該檔是 `AC1027→2013`。
+6. 「另存版本」選 AutoCAD 2013，再用「DWG / DWT 版本表」確認該 DWG 與該 DWT 都是 `AC1027→2013`，且 DWT 輸出副檔名沒有變成 `.dwg`。
 7. 處理中按「停止」，批次會在目前檔案後停下，已完成的輸出保留。
 
 ### 文字擷取
-「② 我要做什麼？」選擇「文字擷取」。使用上方的輸入／輸出資料夾（兩者不可相同，輸出也不可放在輸入裡面），輸入搜尋文字後按「開始擷取文字」。
+「② 我要做什麼？」勾選「文字擷取」。使用上方的輸入／輸出資料夾（兩者不可相同，輸出也不可放在輸入裡面），輸入搜尋文字後按「開始擷取文字」。
 
 這個模式只讀圖，不輸出 DWG，也不修改原始圖檔。每個 DWG 先複製到暫存檔再交給 `accoreconsole`，所以正在 AutoCAD 裡開啟的圖只要還能讀取，也會用複本處理。
 
@@ -119,7 +140,7 @@ AutoLISP 沒有正規表示式。LISP 只負責走訪文字並印出清單，Pyt
 - `textextract.log`、`textextract_batch_*.stdout.log`。
 
 ### 文字取代
-「② 我要做什麼？」選擇「文字取代」。尋找／取代成可以是一般文字，或正規表示式（取代內容可用 `\1`、`\2`）。範例：尋找 `^(W\d+)\s.*$`、取代成 `\1`，會留下假梁編號、去掉後面的尺寸。
+「② 我要做什麼？」勾選「文字取代」。尋找／取代成可以是一般文字，或正規表示式（取代內容可用 `\1`、`\2`）。範例：尋找 `^(W\d+)\s.*$`、取代成 `\1`，會留下假梁編號、去掉後面的尺寸。
 
 修改只發生在暫存複本。有變更的 DWG 才寫進輸出資料夾；原始圖的時間與內容不變。
 - 「只產生變更清單，不輸出 DWG」是預覽。狀態為「預覽」，仍然寫出變更清單。
@@ -137,19 +158,25 @@ MTEXT 會把新的純文字嵌回原本的格式碼，所以沒改到的字仍�
 不在範圍內：標註文字、引線、表格、外部參考裡的文字、欄位碼的計算結果。`FONTALT` 只設成 `txt.shx` 以避免缺字對話框，不會改文字樣式。版本維持 `QSAVE` 的目前格式。
 
 本機確認（Windows、AutoCAD 2027，不是 LT）：
-1. `git pull` 這個分支後，選「文字擷取」，搜尋一段已知的梁編號或中文註解。
+1. `git pull` 這個分支後，勾選「文字擷取」，搜尋一段已知的梁編號或中文註解。
 2. 開啟 `logs\textextract_hits.csv`，核對空間、圖層、圖塊名稱與座標。原始 DWG 的修改時間不變。
-3. 選「文字取代」，用上面的 `^(W\d+)\s.*$` → `\1`，先勾「只產生變更清單」。確認沒有輸出 DWG，變更清單的新文字只剩編號。
+3. 勾選「文字取代」，用上面的 `^(W\d+)\s.*$` → `\1`，先勾「只產生變更清單」。確認沒有輸出 DWG，變更清單的新文字只剩編號。
 4. 取消預覽再跑一次。輸出 DWG 用 AutoCAD 打開，被改的 MTEXT 仍保留字高；沒有符合的檔不會出現在輸出，除非有勾複製。
 5. 讓其中一個 DWG 維持在 AutoCAD 開啟，再跑一次，原始檔仍不被存回。
 
 ### 圖框屬性（標題欄批次讀寫）
-「② 我要做什麼？」選擇「圖框屬性」。「圖框 Block 名稱」填一個或多個名稱，以逗號分隔，可用 `*` 與 `?`（例如 `TITLE*, 圖框*`），不分大小寫；動態圖塊以有效名稱比對。
+> **狀態**：後端已整合，GUI 尚未接線，目前不能從介面操作。GUI 接線將另開 PR，依 main 的多任務（TASKS）架構實作。
+
+後端是 `scripts	itleblock.py` 與 `scripts	itleblock_batch.py`，以程式呼叫：
+- 匯出：`titleblock_batch.run_read(input_dir, output_dir, accore, patterns="TITLE*, 圖框*")`
+- 寫回：`titleblock_batch.run_write(input_dir, output_dir, accore, csv_path=...)`；`dry_run=True` 只預覽。
+
+`patterns` 填一個或多個 Block 名稱，以逗號分隔，可用 `*` 與 `?`，不分大小寫；動態圖塊以有效名稱比對。
 
 1. **匯出圖框屬性**：掃描輸入資料夾的 DWG，把每個符合的圖框插入寫成輸出資料夾裡的 `titleblock_attrs.csv`。每個圖框一列，欄位為 `file`（相對於輸入資料夾）、`layout`、`block_name`、`handle`，之後每個屬性 tag 一欄；同一圖框重複的 tag 會變成 `TAG#2`。不輸出 DWG、不修改原圖。
 2. 用 Excel 編輯 CSV 的屬性值後存檔（UTF-8 或 Excel 預設的 Big5 CSV 都可讀）。前四欄不要改。
-3. **寫回圖框屬性**：「寫回用 CSV」選剛剛編輯的檔（匯出後會自動帶入）。每個 DWG 先複製到暫存檔、重新讀一次目前的屬性，只把和 CSV 不同的值用 accoreconsole + LISP 寫回，`QSAVE` 後搬到輸出資料夾（保留子資料夾結構）。原始 DWG 不會被改寫。CSV 沒有列到的 DWG 不處理。
-   - 「寫回時只預覽變更，不輸出 DWG」是 dry-run，狀態為「預覽」。
+3. **寫回圖框屬性**：把編輯好的 CSV 路徑傳給 `csv_path`。每個 DWG 先複製到暫存檔、重新讀一次目前的屬性，只把和 CSV 不同的值用 accoreconsole + LISP 寫回，`QSAVE` 後搬到輸出資料夾（保留子資料夾結構）。原始 DWG 不會被改寫。CSV 沒有列到的 DWG 不處理。
+   - `dry_run=True` 為預覽，不輸出 DWG，狀態為「預覽」。
    - 已存在的輸出 DWG 會略過，除非勾選覆寫。
 
 結果：
@@ -162,7 +189,7 @@ MTEXT 會把新的純文字嵌回原本的格式碼，所以沒改到的字仍�
 - CSV 填了圖框沒有的 tag、或 handle 在圖面裡找不到，該筆標成「失敗」，同一檔其他變更照常寫回。
 
 ### 自動分圖層
-「② 我要做什麼？」選擇「自動分圖層」。圖檔常常整張都在圖層 0。這個模式依物件類型把實體搬到對應圖層，使用和缺字體修復相同的 accoreconsole 批次、輸出資料夾、`logs\`、`|=|` 結果列與暫存複本。原始圖檔不會被改寫；正在 AutoCAD 裡開啟的圖只要還能讀取，也會用複本處理。
+「② 我要做什麼？」勾選「自動分圖層」。圖檔常常整張都在圖層 0。這個模式依物件類型把實體搬到對應圖層，使用和缺字體修復相同的 accoreconsole 批次、輸出資料夾、`logs\`、`|=|` 結果列與暫存複本。原始圖檔不會被改寫；正在 AutoCAD 裡開啟的圖只要還能讀取，也會用複本處理。
 
 預設對照（可在畫面裡改，圖層名稱空白表示不搬該類型）：
 - `LWPOLYLINE`、`POLYLINE` → `PL`
@@ -203,6 +230,8 @@ MTEXT 會把新的純文字嵌回原本的格式碼，所以沒改到的字仍�
 5. 放一個鎖住的圖層，沒勾解鎖時該層物件留在原地，結果列出略過的圖層；勾選後物件會搬走，圖層仍是鎖定。
 
 ### 差異比對
+> **狀態**：後端已整合，GUI 尚未接線，目前不能從介面操作。GUI 接線將另開 PR，依 main 的多任務（TASKS）架構實作。
+
 比對兩版圖面，列出哪裡改了。原始圖檔不會被修改。
 - 輸入：舊版、新版各選一個檔案，或各選一個資料夾。資料夾依相對路徑配對，副檔名不計（`舊\A\x.dwg` 對 `新\A\x.dxf`）。只在一邊出現的檔案列為 `ONLY_IN_OLD` / `ONLY_IN_NEW`。
 - DWG 先用 accoreconsole 轉成 DXF（存在 `輸出\dwgdiff\dxf\`），DXF 直接讀。只比 DXF 時不需要 AutoCAD。
@@ -216,7 +245,9 @@ MTEXT 會把新的純文字嵌回原本的格式碼，所以沒改到的字仍�
 ```
 
 ### 圖層標準檢查
-「② 我要做什麼？」選擇「圖層標準檢查」，指定圖層標準檔（預設為 `samples\layer_standard.csv`，另有 JSON 範例 `samples\layer_standard.json`）。DXF 直接用 ezdxf 讀取，不需要 AutoCAD；DWG 先用 accoreconsole 轉成 `layer_check\dxf\`。原始圖檔不會被改寫。後端是 `scripts\layerstd.py`。
+> **狀態**：後端已整合，GUI 尚未接線，目前不能從介面操作。GUI 接線將另開 PR，依 main 的多任務（TASKS）架構實作。
+
+後端是 `scripts\layerstd.py`，以 `layerstd.run(input_dir, output_dir, standard, accore, ...)` 呼叫，`standard` 為圖層標準檔（範例 `samples\layer_standard.csv`，另有 JSON 範例 `samples\layer_standard.json`）。DXF 直接用 ezdxf 讀取，不需要 AutoCAD；DWG 先用 accoreconsole 轉成 `layer_check\dxf\`。原始圖檔不會被改寫。
 
 標準檔每列一條，`kind` 欄位決定類型：
 - `exact` / `wildcard` / `regex`：圖層規則，比對圖層名稱（不分大小寫，第一條符合的規則生效）。`color`（ACI，可寫 `1|7` 或 `1-9`）、`linetype`、`lineweight`（`0.25`、`25` 或 `default`）、`plot`（yes/no）空白表示不限；`required=yes` 表示必須至少有一個圖層符合。
