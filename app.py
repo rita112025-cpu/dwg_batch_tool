@@ -1337,6 +1337,13 @@ class App:
             raise TaskError("路徑錯誤", "請指定舊版、新版與輸出資料夾。")
         if not Path(old).exists() or not Path(new).exists():
             raise TaskError("路徑錯誤", "舊版或新版的檔案／資料夾不存在。")
+        # dwgdiff writes converted DXFs under the output folder; inside an input tree a later
+        # run would scan them as inputs.
+        for label, path in (("舊版", old), ("新版", new)):
+            if Path(path).is_dir():
+                problem = fontfix.directory_problem(path, dst)
+                if problem:
+                    raise TaskError("路徑錯誤", f"{label}：{problem}")
         raw = self.v_df_tol.get().strip()
         try:
             tolerance = float(raw)
@@ -1432,7 +1439,8 @@ class App:
             include_blocks=params["include_blocks"], color=params["color"],
             dry_run=params["dry_run"], copy_unchanged=params["copy_unchanged"],
             recursive=params["recursive"], overwrite=params["overwrite"],
-            timeout=params["timeout"], stop_event=self.stop_event, progress=progress, log=log,
+            timeout=params["timeout"], workers=params["workers"],
+            stop_event=self.stop_event, progress=progress, log=log,
         )
 
     def _run_layerclass(self, params, log, progress):

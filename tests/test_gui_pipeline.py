@@ -624,6 +624,29 @@ def test_gui_banner_progress_and_log_colours(tk_root):
     assert a.log_box.tag_ranges("warning") and a.log_box.tag_ranges("failed") and a.log_box.tag_ranges("success")
 
 
+def test_every_workers_runner_forwards_the_worker_count(monkeypatch, tk_root):
+    """Each runner of a batch that takes workers must pass it on, not only store it in params."""
+    import app as appmod
+    monkeypatch.setattr(appmod.App, "_check_env", lambda self: None)
+    _fresh(tk_root)
+    a = appmod.App(tk_root)
+
+    class Params(dict):
+        def __missing__(self, key):
+            return key
+
+    seen = {}
+    for runner, module, func in (
+        ("_run_fontfix", appmod.fontfix_batch, "run"),
+        ("_run_extract", appmod.textbatch, "run_extract"),
+        ("_run_replace", appmod.textbatch, "run_replace"),
+        ("_run_layerclass", appmod.layerbatch, "run"),
+    ):
+        monkeypatch.setattr(module, func, lambda *args, _name=runner, **kwargs: seen.setdefault(_name, kwargs) and {})
+        getattr(a, runner)(Params(workers=5), lambda *args: None, lambda *args: None)
+        assert seen[runner]["workers"] == 5, runner
+
+
 def test_workers_field_reaches_batches_and_is_clamped(monkeypatch, tk_root, tmp_path):
     """The ① 同時處理數 value feeds every batch that takes workers; bad input falls back to a safe count."""
     import app as appmod

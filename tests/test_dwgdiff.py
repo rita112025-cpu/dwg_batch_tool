@@ -242,6 +242,33 @@ def test_gui_diff_mode(tmp_path, monkeypatch, tk_root):
     assert "沒有找到" in a.v_result.get() and "另有 2 個" in a.v_result.get()
 
 
+def test_gui_diff_rejects_an_output_folder_inside_an_input_folder(tmp_path, monkeypatch, tk_root):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    import app as appmod
+    monkeypatch.setattr(appmod.App, "_check_env", lambda self: None)
+    for widget in tk_root.winfo_children():
+        widget.destroy()
+    a = appmod.App(tk_root)
+    old, new = tmp_path / "old", tmp_path / "new"
+    old.mkdir()
+    new.mkdir()
+    a.v_df_old.set(str(old))
+    a.v_df_new.set(str(new))
+    for out, side in ((old, "舊版"), (old / "out", "舊版"), (new, "新版"), (new / "results", "新版")):
+        a.v_out.set(str(out))
+        with pytest.raises(appmod.TaskError) as exc:
+            a._prepare_diff()
+        assert side in exc.value.message, out
+    a.v_out.set(str(tmp_path / "out"))
+    assert a._prepare_diff()["dst"] == str(tmp_path / "out")
+    # file inputs have no tree to overlap with
+    drawing = _save(_base(), tmp_path / "a.dxf")
+    a.v_df_old.set(str(drawing))
+    a.v_df_new.set(str(drawing))
+    a.v_out.set(str(tmp_path / "result"))
+    assert a._prepare_diff()["dst"] == str(tmp_path / "result")
+
+
 def test_more_entity_kinds_and_fields():
     doc = ezdxf.new("R2018")
     msp = doc.modelspace()
