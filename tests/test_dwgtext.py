@@ -143,6 +143,23 @@ def _replace(src, dst, **kwargs):
     return textbatch.run_replace(src, dst, FAKE, timeout=30, **kwargs)
 
 
+def test_extract_hashes_the_source_once(tmp_path, monkeypatch):
+    src = tmp_path / "in"
+    drawing = src / "a.dwg"
+    _dwg(drawing)
+    calls = []
+    real = textbatch.sha256
+
+    def spy(path, *args, **kwargs):
+        calls.append(str(path))
+        return real(path, *args, **kwargs)
+
+    monkeypatch.setattr(textbatch, "sha256", spy)
+    summary = _extract(src, tmp_path / "out", recursive=False)
+    assert summary["fatal"] == ""
+    assert calls.count(str(drawing)) == 1
+
+
 def test_extract_chinese_path_leaves_the_source_and_writes_hits(tmp_path):
     src = tmp_path / "輸入 資料"
     drawing = src / "配置" / "圖面 01.dwg"
@@ -300,7 +317,7 @@ def test_text_modes_widgets(monkeypatch, tk_root, tmp_path):
     app.v_tx_case.set(True)
     app._start_extract()
     deadline = time.time() + 5
-    while app.summary is None and time.time() < deadline:
+    while (app.summary is None or app._busy() or app._batch is not None) and time.time() < deadline:
         tk_root.update()
         time.sleep(0.05)
     assert calls["extract"]["pattern"] == "W12"

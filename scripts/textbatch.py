@@ -31,7 +31,7 @@ from convert_batch import (  # noqa: E402
     _decode,
     _has_blocking_messagebox,
 )
-from convert_single import _terminate, publish_dxf, safe_tmpdir, sha256  # noqa: E402
+from convert_single import _terminate, copy_hashed, publish_dxf, safe_tmpdir, sha256  # noqa: E402
 
 
 def _stamp():
@@ -39,9 +39,8 @@ def _stamp():
 
 
 def _copy_bytes(src, dest):
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    with open(src, "rb") as src_fh, open(dest, "wb") as dest_fh:
-        shutil.copyfileobj(src_fh, dest_fh, length=1024 * 1024)
+    """Copy the source and return its SHA-256."""
+    return copy_hashed(src, dest)
 
 
 def _log_line(handle, message):
@@ -213,13 +212,6 @@ def _prepare(input_dir, output_dir, logs, recursive, overwrite, track_output):
         if track_output and dest is not None and dest.exists() and not overwrite:
             rec["status"] = "SKIPPED"
             job["skip"] = True
-        else:
-            try:
-                job["sha_before"] = sha256(src)
-            except OSError as exc:
-                rec["status"] = "FAILED"
-                rec["error"] = f"無法讀取來源（檔案可能被獨占鎖定）：{exc}"
-                job["skip"] = True
         jobs.append(job)
     temps = []
     todo = [job for job in jobs if not job["skip"]]
@@ -229,7 +221,7 @@ def _prepare(input_dir, output_dir, logs, recursive, overwrite, track_output):
             job["token"] = uuid.uuid4().hex[:10]
             tmp_in = tmpdir / f"in_{job['token']}.dwg"
             try:
-                _copy_bytes(job["src"], tmp_in)
+                job["sha_before"] = _copy_bytes(job["src"], tmp_in)
                 try:
                     os.chmod(tmp_in, stat.S_IWRITE | stat.S_IREAD)
                 except OSError:
