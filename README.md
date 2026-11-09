@@ -84,11 +84,15 @@ GUI log 寫入 `output\logs\gui.log`。掃描不會執行 AutoCAD、不修改任
 
 ### Revit 代理圖形（PROXYGRAPHICS=1）
 
-「② 我要做什麼？」勾選「Revit 代理圖形」。工具會把每個 DWG 複製到暫存檔，透過 `accoreconsole` 設定 `PROXYGRAPHICS=1`、讀回確認後 `QSAVE`，再把完成檔寫入輸出資料夾。
+「② 我要做什麼？」勾選「Revit 代理圖形」。工具會把每個 DWG 複製到暫存檔，透過 `accoreconsole` 設定 `PROXYGRAPHICS=1`，`QSAVE` 後發布成最終輸出，再將最終輸出複製到獨立暫存區重新開啟，讀回 `PROXYGRAPHICS=1` 才算成功。
 
 - 原始 DWG 不會被修改，也不會執行 `EXPLODE`；Cable Tray 等 MEP 物件仍保留為原物件。
 - 可包含子資料夾；輸出會保留相同的相對路徑。既有輸出預設略過，可勾選覆寫。
-- 結果寫入 `logs/proxygraphics_results.csv`、`.jsonl` 與 `proxygraphics.log`。
+- 覆寫既有輸出時，發布前會備份原檔；最終輸出驗證通過才刪除備份，驗證失敗會還原原檔。若還原失敗，備份會保留並把路徑寫進錯誤欄，不會靜默遺失。
+- 若最終輸出是本次新建、但重新開啟驗證失敗，會刪除該未驗證檔案，避免留下錯誤結果。
+- 結果寫入 `logs/proxygraphics_results.csv`、`.jsonl` 與 `proxygraphics.log`。CSV 欄位：
+  `檔案,輸出,狀態,原設定,新設定,存檔,輸出驗證,輸出值,錯誤,秒數`。
+- 只有「輸出驗證=通過」且「輸出值=1」才會標記「已輸出」；暫存檔雜湊只作為輔助診斷，不單獨判定成敗。
 - 這個設定只讓 DWG 儲存代理外觀；如果來源圖已經被炸開或已沒有 Cable Tray 物件，無法用此功能還原。
 
 ### 缺字體修復
