@@ -190,3 +190,41 @@ def test_run_without_accore_fatal_and_stop(tmp_path):
 def test_render_html_clean_report():
     page = layerstd.render_html([layerstd.summarize("f.dxf", [], [])], [], "std.csv", generated="now")
     assert "沒有違規" in page and "now" in page
+
+
+def _finish_task(app):
+    """Wait for the batch worker, then let the GUI consume its queue (what the Tk poll loop does)."""
+    if app.worker is not None:
+        app.worker.join(timeout=30)
+    app._poll()
+
+
+def test_gui_mode_runs_layer_check(tmp_path, monkeypatch, tk_root):
+    import app as appmod
+    monkeypatch.setattr(appmod.App, "_check_env", lambda self: None)
+    for w in tk_root.winfo_children():
+        w.destroy()
+    a = appmod.App(tk_root)
+    a.v_modes["layerstd"].set(True)
+    a._on_mode_toggle("layerstd")
+    assert a.mode_frames["layerstd"].winfo_manager()
+    assert str(a.btn_layerstd["state"]) == "normal"           # DXF checks do not need AutoCAD
+    src = tmp_path / "in"
+    src.mkdir()
+    _drawing(src / "a.dxf")
+    a.v_in.set(str(src))
+    a.v_out.set(str(tmp_path / "out"))
+    a._start_layerstd()
+    _finish_task(a)
+    assert "有圖層不符合標準" in a.v_result.get()
+    assert a._get_primary_result().name == layerstd.HTML_NAME
+    a._on_task_result("layerstd", dict(dwg=0))
+    assert "沒有找到" in a.v_result.get()
+    errors = []
+    monkeypatch.setattr(appmod.messagebox, "showerror", lambda title, text: errors.append(title))
+    a.v_ls_standard.set(str(tmp_path / "missing.csv"))
+    a._start_layerstd()
+    a.v_ls_standard.set(str(SAMPLES / "layer_standard.csv"))
+    a.v_in.set(str(tmp_path / "nope"))
+    a._start_layerstd()
+    assert errors == ["圖層標準檔", "路徑錯誤"]

@@ -57,7 +57,9 @@ GUI log 寫入 `output\logs\gui.log`。掃描不會執行 AutoCAD、不修改任
 「產生 CSV」控制 analyze 的 CSV；`scada_hits.csv` 只要勾選「SCADA 關鍵字搜尋」就會產生。
 
 ### 同時處理數（並行）
-> **狀態**：後端已整合，GUI 尚未接線，目前沒有介面上的「同時處理數」欄位。`config.json` 的 `workers`（1–8，預設 1，即原本的單一 accoreconsole 行為）目前只由 `scripts\batch_convert.py` 讀取；缺字體修復、文字擷取／取代、自動分圖層的 `workers=` 參數預設為 1，需以程式呼叫指定。
+操作：在 ① 基本設定的「同時處理數」填 1–8（預設 1，即原本的單一 accoreconsole 行為）。無法解析的值當成 1，超過 8 會被夾到 8。按「儲存設定」才會寫入 `config.json` 的 `workers`；「儲存設定」位於 ③ 的「DWG 轉 DXF + 解析」區塊，需勾選該任務並展開「進階設定：SCADA 關鍵字」。
+
+適用的任務：DWG 轉 DXF + 解析（含工程資料分析）、缺字體修復、文字擷取、文字取代、自動分圖層。Revit 代理圖形、差異比對、圖層標準檢查與圖框屬性目前沒有並行。
 
 `workers` 決定同時開幾個 `accoreconsole`。檔案會輪流分給這幾個程序同時處理；每個程序內仍是一次開多張圖，啟動成本只付一次。
 - 結果 CSV／JSONL 仍是一檔一列；DWG 轉 DXF 與缺字體修復是做完一張寫一列，所以列的順序可能和檔案順序不同。
@@ -65,11 +67,11 @@ GUI log 寫入 `output\logs\gui.log`。掃描不會執行 AutoCAD、不修改任
 - 數字越大越快，但每個 `accoreconsole` 都會吃記憶體；大圖建議 2–3。
 
 ### 多任務批次（可同時勾選多項）
-「② 我要做什麼？」是核取方塊，可以同時勾選多項任務；「③ 任務設定」會把勾選的任務全部展開。按「開始所選任務（N）」會依畫面順序依序執行：掃描資料夾 → DWG / DWT 版本表 → 缺字體修復 → Revit 代理圖形 → 自動分圖層 → 文字擷取 → 文字取代 → DWG 轉 DXF + 解析 → 工程資料分析。
+「② 我要做什麼？」是核取方塊，可以同時勾選多項任務；「③ 任務設定」會把勾選的任務全部展開。按「開始所選任務（N）」會依畫面順序依序執行：掃描資料夾 → DWG / DWT 版本表 → 缺字體修復 → Revit 代理圖形 → 自動分圖層 → 文字擷取 → 文字取代 → DWG 轉 DXF + 解析 → 工程資料分析 → 差異比對 → 圖層標準檢查 → 圖框屬性匯出 → 圖框屬性寫回。
 
 - 開始前會先檢查所有勾選任務的設定；設定不完整的任務會列在提示中並略過，其餘任務照常執行。若全部都不完整，則不會啟動任何任務。
-- 勾選區下方有「全選」與「全不選」：按「全選」會一次勾選全部 9 項，按「全不選」會全部取消並停用開始按鈕；按下的同時，③ 的設定區塊、開始按鈕上的任務數與執行順序都會立即更新。
-- 「掃描資料夾」、「DWG / DWT 版本表」、「工程資料分析」不需要 AutoCAD。只勾這幾項時，即使找不到 `accoreconsole` 也可以按「開始所選任務」。
+- 勾選區下方有「全選」與「全不選」：按「全選」會一次勾選全部 13 項，按「全不選」會全部取消並停用開始按鈕；按下的同時，③ 的設定區塊、開始按鈕上的任務數與執行順序都會立即更新。
+- 「掃描資料夾」、「DWG / DWT 版本表」、「工程資料分析」、「差異比對」、「圖層標準檢查」不強制需要 AutoCAD：只勾這些時，即使找不到 `accoreconsole` 也可以按「開始所選任務」。其中 DWG 檔需要 AutoCAD 轉 DXF，找不到時該檔會標為失敗，DXF 照常處理。「圖框屬性匯出／寫回」則必須有 `accoreconsole`。
 - 批次只有一個背景 worker，任務一項接一項執行；「停止」會在目前任務結束後停止，尚未開始的任務在結果中標示為「略過（已停止）」。
 - 結果區會列出每一項任務的狀態（成功／略過／警告／失敗）與各自的摘要；「開啟主要結果」會開啟最後一項有輸出檔的任務結果。
 - 各任務區塊下方的「開始…」按鈕仍然只執行該項任務；預設勾選「DWG / DWT 版本表」。
@@ -165,19 +167,19 @@ MTEXT 會把新的純文字嵌回原本的格式碼，所以沒改到的字仍�
 5. 讓其中一個 DWG 維持在 AutoCAD 開啟，再跑一次，原始檔仍不被存回。
 
 ### 圖框屬性（標題欄批次讀寫）
-> **狀態**：後端已整合，GUI 尚未接線，目前不能從介面操作。GUI 接線將另開 PR，依 main 的多任務（TASKS）架構實作。
+介面操作（需要 accoreconsole）：
+1. ② 勾選「圖框屬性匯出」，在 ③ 的「圖框 Block 名稱」確認要比對的名稱（預設 `TITLE*, 圖框*`），按「開始匯出圖框屬性」（或「開始所選任務」）。匯出完成後，產生的 `titleblock_attrs.csv` 路徑會自動填入「寫回用 CSV」。
+2. 用 Excel 編輯該 CSV 的屬性值後存檔。
+3. ② 勾選「圖框屬性寫回」，在 ③ 確認「寫回用 CSV」（匯出後已自動帶入，也可按「選擇…」改選），需要時勾「只預覽變更，不輸出 DWG」，按「開始寫回圖框屬性」。
+4. 結果在 ⑤ 的「圖框屬性」按鈕群（開啟 titleblock_attrs.csv、titleblock_results.csv、titleblock.log）。
 
-後端是 `scripts	itleblock.py` 與 `scripts	itleblock_batch.py`，以程式呼叫：
-- 匯出：`titleblock_batch.run_read(input_dir, output_dir, accore, patterns="TITLE*, 圖框*")`
-- 寫回：`titleblock_batch.run_write(input_dir, output_dir, accore, csv_path=...)`；`dry_run=True` 只預覽。
-
-`patterns` 填一個或多個 Block 名稱，以逗號分隔，可用 `*` 與 `?`，不分大小寫；動態圖塊以有效名稱比對。
+名稱可用 `*` 與 `?`，多個以逗號分隔，不分大小寫；動態圖塊以有效名稱比對。
 
 1. **匯出圖框屬性**：掃描輸入資料夾的 DWG，把每個符合的圖框插入寫成輸出資料夾裡的 `titleblock_attrs.csv`。每個圖框一列，欄位為 `file`（相對於輸入資料夾）、`layout`、`block_name`、`handle`，之後每個屬性 tag 一欄；同一圖框重複的 tag 會變成 `TAG#2`。不輸出 DWG、不修改原圖。
 2. 用 Excel 編輯 CSV 的屬性值後存檔（UTF-8 或 Excel 預設的 Big5 CSV 都可讀）。前四欄不要改。
-3. **寫回圖框屬性**：把編輯好的 CSV 路徑傳給 `csv_path`。每個 DWG 先複製到暫存檔、重新讀一次目前的屬性，只把和 CSV 不同的值用 accoreconsole + LISP 寫回，`QSAVE` 後搬到輸出資料夾（保留子資料夾結構）。原始 DWG 不會被改寫。CSV 沒有列到的 DWG 不處理。
-   - `dry_run=True` 為預覽，不輸出 DWG，狀態為「預覽」。
-   - 已存在的輸出 DWG 會略過，除非勾選覆寫。
+3. **寫回圖框屬性**：讀回編輯好的 CSV。每個 DWG 先複製到暫存檔、重新讀一次目前的屬性，只把和 CSV 不同的值用 accoreconsole + LISP 寫回，`QSAVE` 後搬到輸出資料夾（保留子資料夾結構）。原始 DWG 不會被改寫。CSV 沒有列到的 DWG 不處理。
+   - 勾選「只預覽變更，不輸出 DWG」為預覽，狀態為「預覽」。
+   - 已存在的輸出 DWG 會略過，除非勾選「覆寫既有的輸出 DWG」。
 
 結果：
 - `logs\titleblock_results.csv` / `.jsonl`：每筆變更的檔案、輸出、版面、圖框、handle、tag、原值、新值、狀態（已寫入／預覽／無變更／略過／失敗／已停止）與錯誤。
@@ -230,7 +232,7 @@ MTEXT 會把新的純文字嵌回原本的格式碼，所以沒改到的字仍�
 5. 放一個鎖住的圖層，沒勾解鎖時該層物件留在原地，結果列出略過的圖層；勾選後物件會搬走，圖層仍是鎖定。
 
 ### 差異比對
-> **狀態**：後端已整合，GUI 尚未接線，目前不能從介面操作。GUI 接線將另開 PR，依 main 的多任務（TASKS）架構實作。
+介面操作：② 勾選「差異比對」，在 ③ 的「舊版」「新版」欄位直接貼路徑，或用「檔案」／「資料夾」按鈕選擇（兩邊要同為檔案或同為資料夾）。「座標容差」預設 `0.001`，不可為負數或非數字。輸出資料夾用 ① 的設定。另有三個選項：「優先以 handle 配對物件」、「包含配置（紙空間）」、「包含子資料夾」。按「開始比對」（或「開始所選任務」）。結果在 ⑤ 的「差異比對」按鈕群（開啟 diff_summary.csv、diff_details.csv、diff_report.json）。
 
 比對兩版圖面，列出哪裡改了。原始圖檔不會被修改。
 - 輸入：舊版、新版各選一個檔案，或各選一個資料夾。資料夾依相對路徑配對，副檔名不計（`舊\A\x.dwg` 對 `新\A\x.dxf`）。只在一邊出現的檔案列為 `ONLY_IN_OLD` / `ONLY_IN_NEW`。
@@ -244,10 +246,9 @@ MTEXT 會把新的純文字嵌回原本的格式碼，所以沒改到的字仍�
 .venv\Scripts\python scripts\dwgdiff.py <舊版> <新版> <輸出資料夾> [--accore <accoreconsole.exe>] [--tolerance 0.001] [--no-handles]
 ```
 
-### 圖層標準檢查
-> **狀態**：後端已整合，GUI 尚未接線，目前不能從介面操作。GUI 接線將另開 PR，依 main 的多任務（TASKS）架構實作。
+介面操作：② 勾選「圖層標準檢查」。輸入／輸出資料夾用 ① 的設定；「圖層標準檔」預設為 `samples\layer_standard.csv`，可直接編輯路徑或按「瀏覽」改選（CSV 或 JSON，範例另有 `samples\layer_standard.json`）。「重新轉換已存在的 DXF」與「包含子資料夾」可勾選。按「開始檢查圖層」（或「開始所選任務」）。結果在 ⑤ 的「圖層標準檢查」按鈕群（開啟 layer_check_report.html、layer_check_summary.csv、layer_check_details.csv）。
 
-後端是 `scripts\layerstd.py`，以 `layerstd.run(input_dir, output_dir, standard, accore, ...)` 呼叫，`standard` 為圖層標準檔（範例 `samples\layer_standard.csv`，另有 JSON 範例 `samples\layer_standard.json`）。DXF 直接用 ezdxf 讀取，不需要 AutoCAD；DWG 先用 accoreconsole 轉成 `layer_check\dxf\`。原始圖檔不會被改寫。
+DXF 直接用 ezdxf 讀取，不需要 AutoCAD；DWG 先用 accoreconsole 轉成 `layer_check\dxf\`。原始圖檔不會被改寫。圖層標準檔的格式如下（命令列與程式呼叫同樣使用 `layerstd.run(input_dir, output_dir, standard, accore, ...)`）。
 
 標準檔每列一條，`kind` 欄位決定類型：
 - `exact` / `wildcard` / `regex`：圖層規則，比對圖層名稱（不分大小寫，第一條符合的規則生效）。`color`（ACI，可寫 `1|7` 或 `1-9`）、`linetype`、`lineweight`（`0.25`、`25` 或 `default`）、`plot`（yes/no）空白表示不限；`required=yes` 表示必須至少有一個圖層符合。
