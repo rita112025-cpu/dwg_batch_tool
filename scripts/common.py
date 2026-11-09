@@ -20,7 +20,7 @@ def load_config(path=None):
             if not example.exists():
                 raise FileNotFoundError(
                     f"找不到設定檔：{p}（也找不到 {example}）。"
-                    "請將 config.example.json 複製為 config.json 後再修改路徑。")
+                    "請複製 config.example.json 為 config.json 後再修改路徑。")
             p = example
     with open(p, encoding="utf-8") as f:
         cfg = json.load(f)

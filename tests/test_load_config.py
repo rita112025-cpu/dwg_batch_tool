@@ -36,7 +36,7 @@ def test_error_when_neither_file_exists(fake_root):
     message = str(exc.value)
     assert "config.json" in message
     assert "config.example.json" in message
-    assert "複製" in message
+    assert "請複製 config.example.json 為 config.json" in message
 
 
 def test_explicit_missing_path_still_raises(fake_root):
