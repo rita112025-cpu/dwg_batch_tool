@@ -7,6 +7,7 @@ import threading
 from pathlib import Path
 
 import ezdxf
+import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 import convert_single  # noqa: E402
@@ -89,6 +90,7 @@ def test_safe_tmpdir_is_script_safe(tmp_path):
 
 
 def test_demo_multiformat_runs_end_to_end(tmp_path, monkeypatch):
+    pytest.importorskip("ifcopenshell")  # optional dependency (requirements-ifc.txt)
     # No capsys here: pymupdf keeps the stdout it sees on first import.
     out = tmp_path / "demo"
     monkeypatch.setattr(sys, "argv", ["demo_multiformat.py", "--output", str(out)])
