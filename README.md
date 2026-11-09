@@ -25,11 +25,34 @@ DWG -> accoreconsole.exe -> DXF -> ezdxf -> CSV / JSON / log
 - Python 套件：`ezdxf`（使用者層級 venv，不需管理員權限）
 
 ## 安裝
-```
-python -m venv .venv
-.venv\Scripts\python -m pip install -r requirements.txt
-```
-`config.json` 的 `accoreconsole` 指向實際路徑（找不到時 `run.bat` 直接停止，不會猜路徑）。
+1. 取得程式碼：
+   ```
+   git clone <repo-url> dwg_batch_tool
+   cd dwg_batch_tool
+   ```
+2. 建立虛擬環境並安裝套件：
+   ```
+   python -m venv .venv
+   .venv\Scripts\python -m pip install -r requirements.txt
+   ```
+3. 複製設定範本，再依本機修改：
+   ```
+   copy config.example.json config.json
+   ```
+   - `config.json` 不進版本控制（已列入 `.gitignore`），每台電腦各自保存。
+   - `input_dir` / `output_dir` 預設為相對路徑 `input`、`output`（以專案根目錄為基準），可保留或改為絕對路徑。
+   - `accoreconsole`：範本預設為空字串，請填入本機 `accoreconsole.exe` 的路徑，例如：
+     ```
+     "accoreconsole": "C:\\Program Files\\Autodesk\\AutoCAD 2027\\accoreconsole.exe"
+     ```
+     路徑留空或找不到檔案時，`run.bat` 會停止（`env_check` 回報 exit 3），不會自動猜測路徑。
+4. 執行：
+   ```
+   run.bat
+   ```
+   （桌面介面見下方「桌面 UI」。）
+
+若沒有 `config.json`，程式會暫時讀取 `config.example.json`；但該範本的 `accoreconsole` 為空，因此無法轉檔，請完成步驟 3。`pytest` 也會遵循同樣的順序。
 
 ## 目錄結構
 ```

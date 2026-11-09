@@ -13,3 +13,5 @@ baseline_results.txt
 artifacts/
 *.bak_*
 shiba_gentleman_cafe*.png
+# machine-specific settings (copy config.example.json to config.json)
+config.json

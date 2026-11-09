@@ -7,7 +7,21 @@ ROOT = Path(__file__).resolve().parent.parent
 
 
 def load_config(path=None):
-    p = Path(path) if path else ROOT / "config.json"
+    """Load config. With no explicit path: config.json, else config.example.json.
+
+    An explicit path that does not exist raises FileNotFoundError as usual.
+    """
+    if path:
+        p = Path(path)
+    else:
+        p = ROOT / "config.json"
+        if not p.exists():
+            example = ROOT / "config.example.json"
+            if not example.exists():
+                raise FileNotFoundError(
+                    f"找不到設定檔：{p}（也找不到 {example}）。"
+                    "請複製 config.example.json 為 config.json 後再修改路徑。")
+            p = example
     with open(p, encoding="utf-8") as f:
         cfg = json.load(f)
     return cfg
