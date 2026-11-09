@@ -25,11 +25,34 @@ DWG -> accoreconsole.exe -> DXF -> ezdxf -> CSV / JSON / log
 - Python 套件：`ezdxf`（使用者層級 venv，不需管理員權限）
 
 ## 安裝
-```
-python -m venv .venv
-.venv\Scripts\python -m pip install -r requirements.txt
-```
-`config.json` 的 `accoreconsole` 指向實際路徑（找不到時 `run.bat` 直接停止，不會猜路徑）。
+1. 取得程式碼：
+   ```
+   git clone <repo-url> dwg_batch_tool
+   cd dwg_batch_tool
+   ```
+2. 建立虛擬環境並安裝套件：
+   ```
+   python -m venv .venv
+   .venv\Scripts\python -m pip install -r requirements.txt
+   ```
+3. 複製設定範本，再依本機修改：
+   ```
+   copy config.example.json config.json
+   ```
+   - `config.json` 不進版本控制（已列入 `.gitignore`），每台電腦各自保存。
+   - `input_dir` / `output_dir` 預設為相對路徑 `input`、`output`（以專案根目錄為基準），可保留或改為絕對路徑。
+   - `accoreconsole`：範本預設為空字串，請填入本機 `accoreconsole.exe` 的路徑，例如：
+     ```
+     "accoreconsole": "C:\\Program Files\\Autodesk\\AutoCAD 2027\\accoreconsole.exe"
+     ```
+     路徑留空或找不到檔案時，`run.bat` 會停止（`env_check` 回報 exit 3），不會自動猜測路徑。
+4. 執行：
+   ```
+   run.bat
+   ```
+   （桌面介面見下方「桌面 UI」。）
+
+若沒有 `config.json`，程式會暫時讀取 `config.example.json`；但該範本的 `accoreconsole` 為空，因此無法轉檔，請完成步驟 3。`pytest` 也會遵循同樣的順序。
 
 ## 目錄結構
 ```
@@ -86,11 +109,15 @@ GUI log 寫入 `output\logs\gui.log`。掃描不會執行 AutoCAD、不修改任
 
 ### Revit 代理圖形（PROXYGRAPHICS=1）
 
-「② 我要做什麼？」勾選「Revit 代理圖形」。工具會把每個 DWG 複製到暫存檔，透過 `accoreconsole` 設定 `PROXYGRAPHICS=1`、讀回確認後 `QSAVE`，再把完成檔寫入輸出資料夾。
+「② 我要做什麼？」勾選「Revit 代理圖形」。工具會把每個 DWG 複製到暫存檔，透過 `accoreconsole` 設定 `PROXYGRAPHICS=1`，`QSAVE` 後發布成最終輸出，再將最終輸出複製到獨立暫存區重新開啟，讀回 `PROXYGRAPHICS=1` 才算成功。
 
 - 原始 DWG 不會被修改，也不會執行 `EXPLODE`；Cable Tray 等 MEP 物件仍保留為原物件。
 - 可包含子資料夾；輸出會保留相同的相對路徑。既有輸出預設略過，可勾選覆寫。
-- 結果寫入 `logs/proxygraphics_results.csv`、`.jsonl` 與 `proxygraphics.log`。
+- 覆寫既有輸出時，發布前會備份原檔；最終輸出驗證通過才刪除備份，驗證失敗會還原原檔。若還原失敗，備份會保留並把路徑寫進錯誤欄，不會靜默遺失。
+- 若最終輸出是本次新建、但重新開啟驗證失敗，會刪除該未驗證檔案，避免留下錯誤結果。
+- 結果寫入 `logs/proxygraphics_results.csv`、`.jsonl` 與 `proxygraphics.log`。CSV 欄位：
+  `檔案,輸出,狀態,原設定,新設定,存檔,輸出驗證,輸出值,錯誤,秒數`。
+- 只有「輸出驗證=通過」且「輸出值=1」才會標記「已輸出」；暫存檔雜湊只作為輔助診斷，不單獨判定成敗。
 - 這個設定只讓 DWG 儲存代理外觀；如果來源圖已經被炸開或已沒有 Cable Tray 物件，無法用此功能還原。
 
 ### 缺字體修復

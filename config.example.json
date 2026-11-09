@@ -1,6 +1,6 @@
 {
-  "input_dir": "D:\\drawings\\input",
-  "output_dir": "D:\\drawings\\output",
+  "input_dir": "input",
+  "output_dir": "output",
   "recursive": true,
   "overwrite": false,
   "specification_attribute_tags": [
@@ -8,7 +8,7 @@
     "SPEC"
   ],
   "dxf_version": "2018",
-  "accoreconsole": "C:\\Program Files\\Autodesk\\AutoCAD 2027\\accoreconsole.exe",
+  "accoreconsole": "",
   "timeout_seconds": 300,
   "keywords": [
     "SCADA",
