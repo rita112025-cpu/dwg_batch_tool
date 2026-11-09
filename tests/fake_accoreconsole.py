@@ -9,6 +9,7 @@ tested without AutoCAD.
 """
 from __future__ import annotations
 
+import os
 import re
 import sys
 from pathlib import Path
@@ -78,7 +79,31 @@ def _is_qsave(raw: str) -> bool:
     return folded in {"_.QSAVE", "_QSAVE"} or '(COMMAND "_.QSAVE")' in folded
 
 
+def _verify_messages(script_text: str) -> list[str]:
+    """Fake the read-only reopen used to verify the published PROXYGRAPHICS value."""
+    lines = script_text.splitlines()
+    pending = ""
+    for index, raw in enumerate(lines):
+        text = raw.strip()
+        if text.upper() in {"_.OPEN", "_OPEN"} and index + 1 < len(lines):
+            pending = lines[index + 1].strip().strip('"')
+        elif "PROXYGRAPHICS_VERIFY" in text:
+            if os.environ.get("PG_FAKE_VERIFY_OPEN_FAIL") == "1":
+                return []
+            if not pending or not Path(pending).is_file():
+                return []
+            forced = os.environ.get("PG_FAKE_VERIFY_VALUE")
+            if forced is not None:
+                value = forced
+            else:
+                value = "1" if b"\nPROXYGRAPHICS=1" in Path(pending).read_bytes() else "0"
+            return [f"PROXYGRAPHICS_VERIFY|=|{value}"]
+    return []
+
+
 def _messages_for(script_text: str) -> list[str]:
+    if "PROXYGRAPHICS_VERIFY" in script_text:
+        return _verify_messages(script_text)
     lines = script_text.splitlines()
     text_dump = "tx-dump-current" in script_text
     text_apply = "tx-apply-" in script_text
@@ -149,6 +174,17 @@ def _messages_for(script_text: str) -> list[str]:
                 messages.append("PROXYGRAPHICS_RESULT|=|1|=|1")
             else:
                 messages.append("PROXYGRAPHICS_RESULT|=|0|=|1")
+        elif proxy_mode and "PROXYGRAPHICS_SAVE" in raw:
+            data = Path(pending).read_bytes() if pending and Path(pending).is_file() else b""
+            before = 1 if b"\nPROXYGRAPHICS=1" in data else 0
+            if before == 1:
+                messages.append("PROXYGRAPHICS_SAVE|=|NOT_REQUIRED")
+            elif os.environ.get("PG_FAKE_QSAVE_FAIL") == "1":
+                messages.append("PROXYGRAPHICS_SAVE|=|FAILED|=|simulated QSAVE failure")
+            else:
+                if b"\nPROXYGRAPHICS=1" not in data:
+                    Path(pending).write_bytes(data + b"\nPROXYGRAPHICS=1")
+                messages.append("PROXYGRAPHICS_SAVE|=|OK")
         elif _is_qsave(raw) and pending and Path(pending).is_file():
             path = Path(pending)
             data = path.read_bytes()
