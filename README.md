@@ -56,6 +56,14 @@ tkinter 介面：選輸入/輸出資料夾、勾選處理選項、編輯關鍵�
 GUI log 寫入 `output\logs\gui.log`。掃描不會執行 AutoCAD、不修改任何檔案。
 「產生 CSV」控制 analyze 的 CSV；`scada_hits.csv` 只要勾選「SCADA 關鍵字搜尋」就會產生。
 
+### 同時處理數（並行）
+> **狀態**：後端已整合，GUI 尚未接線，目前沒有介面上的「同時處理數」欄位。`config.json` 的 `workers`（1–8，預設 1，即原本的單一 accoreconsole 行為）目前只由 `scripts\batch_convert.py` 讀取；缺字體修復、文字擷取／取代、自動分圖層的 `workers=` 參數預設為 1，需以程式呼叫指定。
+
+`workers` 決定同時開幾個 `accoreconsole`。檔案會輪流分給這幾個程序同時處理；每個程序內仍是一次開多張圖，啟動成本只付一次。
+- 結果 CSV／JSONL 仍是一檔一列；DWG 轉 DXF 與缺字體修復是做完一張寫一列，所以列的順序可能和檔案順序不同。
+- 「停止」會同時中止所有程序。
+- 數字越大越快，但每個 `accoreconsole` 都會吃記憶體；大圖建議 2–3。
+
 ### 多任務批次（可同時勾選多項）
 「② 我要做什麼？」是核取方塊，可以同時勾選多項任務；「③ 任務設定」會把勾選的任務全部展開。按「開始所選任務（N）」會依畫面順序依序執行：掃描資料夾 → DWG / DWT 版本表 → 缺字體修復 → Revit 代理圖形 → 自動分圖層 → 文字擷取 → 文字取代 → DWG 轉 DXF + 解析 → 工程資料分析。
 
@@ -76,11 +84,15 @@ GUI log 寫入 `output\logs\gui.log`。掃描不會執行 AutoCAD、不修改任
 
 ### Revit 代理圖形（PROXYGRAPHICS=1）
 
-「② 我要做什麼？」勾選「Revit 代理圖形」。工具會把每個 DWG 複製到暫存檔，透過 `accoreconsole` 設定 `PROXYGRAPHICS=1`、讀回確認後 `QSAVE`，再把完成檔寫入輸出資料夾。
+「② 我要做什麼？」勾選「Revit 代理圖形」。工具會把每個 DWG 複製到暫存檔，透過 `accoreconsole` 設定 `PROXYGRAPHICS=1`，`QSAVE` 後發布成最終輸出，再將最終輸出複製到獨立暫存區重新開啟，讀回 `PROXYGRAPHICS=1` 才算成功。
 
 - 原始 DWG 不會被修改，也不會執行 `EXPLODE`；Cable Tray 等 MEP 物件仍保留為原物件。
 - 可包含子資料夾；輸出會保留相同的相對路徑。既有輸出預設略過，可勾選覆寫。
-- 結果寫入 `logs/proxygraphics_results.csv`、`.jsonl` 與 `proxygraphics.log`。
+- 覆寫既有輸出時，發布前會備份原檔；最終輸出驗證通過才刪除備份，驗證失敗會還原原檔。若還原失敗，備份會保留並把路徑寫進錯誤欄，不會靜默遺失。
+- 若最終輸出是本次新建、但重新開啟驗證失敗，會刪除該未驗證檔案，避免留下錯誤結果。
+- 結果寫入 `logs/proxygraphics_results.csv`、`.jsonl` 與 `proxygraphics.log`。CSV 欄位：
+  `檔案,輸出,狀態,原設定,新設定,存檔,輸出驗證,輸出值,錯誤,秒數`。
+- 只有「輸出驗證=通過」且「輸出值=1」才會標記「已輸出」；暫存檔雜湊只作為輔助診斷，不單獨判定成敗。
 - 這個設定只讓 DWG 儲存代理外觀；如果來源圖已經被炸開或已沒有 Cable Tray 物件，無法用此功能還原。
 
 ### 缺字體修復
@@ -156,6 +168,30 @@ MTEXT 會把新的純文字嵌回原本的格式碼，所以沒改到的字仍�
 4. 取消預覽再跑一次。輸出 DWG 用 AutoCAD 打開，被改的 MTEXT 仍保留字高；沒有符合的檔不會出現在輸出，除非有勾複製。
 5. 讓其中一個 DWG 維持在 AutoCAD 開啟，再跑一次，原始檔仍不被存回。
 
+### 圖框屬性（標題欄批次讀寫）
+> **狀態**：後端已整合，GUI 尚未接線，目前不能從介面操作。GUI 接線將另開 PR，依 main 的多任務（TASKS）架構實作。
+
+後端是 `scripts	itleblock.py` 與 `scripts	itleblock_batch.py`，以程式呼叫：
+- 匯出：`titleblock_batch.run_read(input_dir, output_dir, accore, patterns="TITLE*, 圖框*")`
+- 寫回：`titleblock_batch.run_write(input_dir, output_dir, accore, csv_path=...)`；`dry_run=True` 只預覽。
+
+`patterns` 填一個或多個 Block 名稱，以逗號分隔，可用 `*` 與 `?`，不分大小寫；動態圖塊以有效名稱比對。
+
+1. **匯出圖框屬性**：掃描輸入資料夾的 DWG，把每個符合的圖框插入寫成輸出資料夾裡的 `titleblock_attrs.csv`。每個圖框一列，欄位為 `file`（相對於輸入資料夾）、`layout`、`block_name`、`handle`，之後每個屬性 tag 一欄；同一圖框重複的 tag 會變成 `TAG#2`。不輸出 DWG、不修改原圖。
+2. 用 Excel 編輯 CSV 的屬性值後存檔（UTF-8 或 Excel 預設的 Big5 CSV 都可讀）。前四欄不要改。
+3. **寫回圖框屬性**：把編輯好的 CSV 路徑傳給 `csv_path`。每個 DWG 先複製到暫存檔、重新讀一次目前的屬性，只把和 CSV 不同的值用 accoreconsole + LISP 寫回，`QSAVE` 後搬到輸出資料夾（保留子資料夾結構）。原始 DWG 不會被改寫。CSV 沒有列到的 DWG 不處理。
+   - `dry_run=True` 為預覽，不輸出 DWG，狀態為「預覽」。
+   - 已存在的輸出 DWG 會略過，除非勾選覆寫。
+
+結果：
+- `logs\titleblock_results.csv` / `.jsonl`：每筆變更的檔案、輸出、版面、圖框、handle、tag、原值、新值、狀態（已寫入／預覽／無變更／略過／失敗／已停止）與錯誤。
+- `logs\titleblock_read_results.csv`、`titleblock_read.log`、`titleblock.log`，以及各階段的 `titleblock_*_batch_*.stdout.log`。
+
+注意：
+- Excel 會把 `001` 變成 `1`、`1.50` 變成 `1.5`。這類「數值相同、字串不同」的變更會標成「略過」不寫入；需要保留前導零時請用 Excel「資料 → 從文字/CSV」把欄位設成文字。像 `1E5` 這種會被當成科學記號的 handle，匯出時寫成 `="1E5"` 保護。
+- 多行屬性（MTEXT 屬性）只匯出第一段文字，不支援寫回（標成「略過」）。
+- CSV 填了圖框沒有的 tag、或 handle 在圖面裡找不到，該筆標成「失敗」，同一檔其他變更照常寫回。
+
 ### 自動分圖層
 「② 我要做什麼？」勾選「自動分圖層」。圖檔常常整張都在圖層 0。這個模式依物件類型把實體搬到對應圖層，使用和缺字體修復相同的 accoreconsole 批次、輸出資料夾、`logs\`、`|=|` 結果列與暫存複本。原始圖檔不會被改寫；正在 AutoCAD 裡開啟的圖只要還能讀取，也會用複本處理。
 
@@ -196,6 +232,38 @@ MTEXT 會把新的純文字嵌回原本的格式碼，所以沒改到的字仍�
 3. 取消預覽再跑。原始檔時間不變。輸出 DWG 裡聚合線在 `PL`、文字在 `TST`、填充在 `H`、圖塊在以圖塊名稱命名的圖層。新圖層顏色為 1–9，舊圖層顏色沒變。
 4. 取消「保持原外觀」再輸出到另一個資料夾，BYLAYER 的線應跟著新圖層變色；勾著時外觀應接近原圖。
 5. 放一個鎖住的圖層，沒勾解鎖時該層物件留在原地，結果列出略過的圖層；勾選後物件會搬走，圖層仍是鎖定。
+
+### 差異比對
+> **狀態**：後端已整合，GUI 尚未接線，目前不能從介面操作。GUI 接線將另開 PR，依 main 的多任務（TASKS）架構實作。
+
+比對兩版圖面，列出哪裡改了。原始圖檔不會被修改。
+- 輸入：舊版、新版各選一個檔案，或各選一個資料夾。資料夾依相對路徑配對，副檔名不計（`舊\A\x.dwg` 對 `新\A\x.dxf`）。只在一邊出現的檔案列為 `ONLY_IN_OLD` / `ONLY_IN_NEW`。
+- DWG 先用 accoreconsole 轉成 DXF（存在 `輸出\dwgdiff\dxf\`），DXF 直接讀。只比 DXF 時不需要 AutoCAD。
+- 比對內容：圖層（新增／刪除／顏色、線型、線寬、開關、凍結、鎖定、出圖）、圖塊插入與屬性值、TEXT／MTEXT 內容、標註的量測值與覆寫文字、一般物件的新增／刪除／移動。
+- 物件配對：先用 handle，handle 對不上時用「類型＋圖層＋配置＋幾何指紋」，再用「座標差都在容差內」。座標容差預設 `0.001`。取消「優先以 handle 配對」就只用幾何配對。
+- 輸出（`輸出\dwgdiff\`）：`diff_summary.csv`（每組檔案一列：狀態、新增／刪除／修改數、各類別數量）、`diff_details.csv`（每筆變更：file、category、change_type=ADDED/REMOVED/MODIFIED、layer、handle、field、before、after、position）、`diff_report.json`（同樣內容加比對參數）。
+
+命令列：
+```
+.venv\Scripts\python scripts\dwgdiff.py <舊版> <新版> <輸出資料夾> [--accore <accoreconsole.exe>] [--tolerance 0.001] [--no-handles]
+```
+
+### 圖層標準檢查
+> **狀態**：後端已整合，GUI 尚未接線，目前不能從介面操作。GUI 接線將另開 PR，依 main 的多任務（TASKS）架構實作。
+
+後端是 `scripts\layerstd.py`，以 `layerstd.run(input_dir, output_dir, standard, accore, ...)` 呼叫，`standard` 為圖層標準檔（範例 `samples\layer_standard.csv`，另有 JSON 範例 `samples\layer_standard.json`）。DXF 直接用 ezdxf 讀取，不需要 AutoCAD；DWG 先用 accoreconsole 轉成 `layer_check\dxf\`。原始圖檔不會被改寫。
+
+標準檔每列一條，`kind` 欄位決定類型：
+- `exact` / `wildcard` / `regex`：圖層規則，比對圖層名稱（不分大小寫，第一條符合的規則生效）。`color`（ACI，可寫 `1|7` 或 `1-9`）、`linetype`、`lineweight`（`0.25`、`25` 或 `default`）、`plot`（yes/no）空白表示不限；`required=yes` 表示必須至少有一個圖層符合。
+- `forbidden`：符合 `pattern`（萬用字元）的圖層不得存在。
+- `setting`：全域設定，`pattern` 為名稱、`value` 為值：`name_regex`（命名規則，區分大小寫）、`unlisted_layers`、`layer0_entities`、`empty_layers`（皆為 `error` / `warning` / `off`）。
+
+違規類型：`NAME_NONSTANDARD`、`COLOR_MISMATCH`、`LINETYPE_MISMATCH`、`LINEWEIGHT_MISMATCH`、`PLOT_MISMATCH`、`ENTITIES_ON_LAYER_0`（只算模型／配置空間，圖塊定義內的圖元不算）、`EMPTY_LAYER`、`MISSING_REQUIRED_LAYER`、`LAYER_FORBIDDEN`。圖層 `0` 與 `Defpoints` 不做命名與空圖層檢查。
+
+輸出在輸出資料夾的 `layer_check\`：
+- `layer_check_details.csv`：每筆違規一列（file、layer、rule、severity、expected、actual）。
+- `layer_check_summary.csv`：每檔一列，含錯誤／警告數與合規率（沒有錯誤級違規的圖層數 ÷（圖層數＋缺少的必要圖層數））。
+- `layer_check_report.html`：單檔 HTML 報告，內嵌 CSS，可直接寄給別人開啟。
 
 ### 桌面捷徑
 雙擊 `create_shortcut.bat` 會在桌面建立「DWG分析」捷徑（圖示為 `dwg_analysis.ico`）。

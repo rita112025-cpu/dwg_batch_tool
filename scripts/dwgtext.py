@@ -695,12 +695,15 @@ def build_dump_script(jobs, lisp_path):
 def build_apply_script(jobs, lisp_path):
     lines = _preamble(lisp_path)
     for i, job in enumerate(jobs):
+        # tx-apply-N is numbered over the whole apply list; the OPEN/DONE markers
+        # count within this launch (a relaunch after a stall, or a worker slice).
+        edit = job.get("apply_index", i)
         lines.append("_.OPEN")
         lines.append(f'"{job["spath"]}"')
         lines.append(f'(princ (strcat "\\nDWGB" "ATCH_OPEN_{i}|" (getvar "DWGNAME") "|\\n"))')
         lines.append(
-            f"(if (and (boundp 'tx-apply-{i}) tx-apply-{i}) "
-            f'(tx-apply-{i}) (princ (strcat "\\nTEXT_" "ERROR{MARKER_SEP}lisp not loaded\\n")))'
+            f"(if (and (boundp 'tx-apply-{edit}) tx-apply-{edit}) "
+            f'(tx-apply-{edit}) (princ (strcat "\\nTEXT_" "ERROR{MARKER_SEP}lisp not loaded\\n")))'
         )
         lines.append("_.QSAVE")
         lines.append(f'(princ (strcat "\\nDWGB" "ATCH_DONE_{i}_\\n"))')

@@ -1,0 +1,15 @@
+﻿kind,pattern,value,color,linetype,lineweight,plot,required,description
+setting,name_regex,"^[A-Z0-9][A-Z0-9_\-]*$",,,,,,圖層名稱只用大寫英數、底線、減號
+setting,unlisted_layers,warning,,,,,,不在標準內的圖層
+setting,layer0_entities,error,,,,,,圖層 0 上不得有圖元（圖塊定義內除外）
+setting,empty_layers,warning,,,,,,沒有任何圖元的圖層
+exact,0,,7,Continuous,,,,
+exact,Defpoints,,,,,no,,
+wildcard,A-WALL*,,1|7,Continuous,0.35|0.50,yes,yes,建築牆
+wildcard,A-DOOR*,,3,Continuous,0.25,yes,,門
+wildcard,E-CABLE*,,4|5,Continuous|DASHED,0.25,yes,,電纜
+wildcard,*-DIM,,2,Continuous,0.18,yes,,標註
+wildcard,*-TEXT,,7,Continuous,0.18|0.25,yes,,文字
+regex,^S-COL-\d{2}$,,1-9,Continuous,default,yes,,結構柱（S-COL-01 等）
+wildcard,X-NOPLOT*,,8,,,no,,參考用、不列印
+forbidden,TEMP*,,,,,,,暫存圖層不得留在圖面
