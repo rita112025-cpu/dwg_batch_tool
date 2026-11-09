@@ -9,12 +9,14 @@ tested without AutoCAD.
 """
 from __future__ import annotations
 
+import os
 import re
 import sys
 from pathlib import Path
 
 CRASH = b"FONTFIX_TEST_CRASH"
 EMPTY = b"LAYER_TEST_EMPTY"
+TB_NOREADY = b"TB_TEST_NOREADY"
 
 _LAYER_DUMP = [
     "LAYERROW|=|PL|=|1|=|LWPOLYLINE|=|4|=|0|=|1",
@@ -38,18 +40,80 @@ _TEXT_DUMP = [
 ]
 
 
+# Fixed dump the title-block tests read: a matching TITLE-A1, a dynamic block
+# whose effective name is 圖框A3 (one multi-line attribute), and a DOOR.
+_TB_DUMP = [
+    "TBINSERT|=|Layout1|=|TITLE-A1|=|TITLE-A1|=|1A0",
+    "TBATTR|=|1A0|=|DWG_NO|=|001|=|1A1|=|0",
+    "TBATTR|=|1A0|=|TITLE|=|一樓平面圖|=|1A2|=|0",
+    "TBATTR|=|1A0|=|DATE|=|2026/01/05|=|1A3|=|0",
+    "TBINSERT|=|Model|=|*U12|=|圖框A3|=|1E5",
+    "TBATTR|=|1E5|=|DWG_NO|=|A-002|=|2B1|=|0",
+    "TBATTR|=|1E5|=|NOTE|=|多行|=|2B2|=|1",
+    "TBINSERT|=|Model|=|DOOR|=|DOOR|=|3C0",
+    "TBATTR|=|3C0|=|D1|=|門|=|3C1|=|0",
+    "TBDUMP_SUMMARY|=|3",
+]
+
+
+def _tb_apply_rows(script_text: str, number: str) -> list[str]:
+    """Echo ``ok`` for each handle in ``tb-apply-<number>``; handle DEAD reports missing."""
+    found = re.search(r'\(load "([^"]+)"\)', script_text)
+    if not found or not Path(found.group(1)).is_file():
+        return []
+    lisp = Path(found.group(1)).read_text(encoding="utf-8-sig")
+    start = lisp.find(f"(defun tb-apply-{number} ()")
+    end = lisp.find("\n(defun ", start + 1)
+    text = "" if start < 0 else lisp[start:end if end > 0 else len(lisp)]
+    rows, ok, fail = [], 0, 0
+    for handle in re.findall(r'\(list "([^"]*)" ', text):
+        status = "missing" if handle == "DEAD" else "ok"
+        ok, fail = (ok + 1, fail) if status == "ok" else (ok, fail + 1)
+        rows.append(f"TBAPPLY|=|{handle}|=|{status}")
+    rows.append(f"TBAPPLY_SUMMARY|=|{ok}|=|{fail}")
+    return rows
+
+
 def _is_qsave(raw: str) -> bool:
     folded = raw.upper()
     return folded in {"_.QSAVE", "_QSAVE"} or '(COMMAND "_.QSAVE")' in folded
 
 
+def _verify_messages(script_text: str) -> list[str]:
+    """Fake the read-only reopen used to verify the published PROXYGRAPHICS value."""
+    lines = script_text.splitlines()
+    pending = ""
+    for index, raw in enumerate(lines):
+        text = raw.strip()
+        if text.upper() in {"_.OPEN", "_OPEN"} and index + 1 < len(lines):
+            pending = lines[index + 1].strip().strip('"')
+        elif "PROXYGRAPHICS_VERIFY" in text:
+            if os.environ.get("PG_FAKE_VERIFY_OPEN_FAIL") == "1":
+                return []
+            if not pending or not Path(pending).is_file():
+                return []
+            forced = os.environ.get("PG_FAKE_VERIFY_VALUE")
+            if forced is not None:
+                value = forced
+            else:
+                value = "1" if b"\nPROXYGRAPHICS=1" in Path(pending).read_bytes() else "0"
+            return [f"PROXYGRAPHICS_VERIFY|=|{value}"]
+    return []
+
+
 def _messages_for(script_text: str) -> list[str]:
+    if "PROXYGRAPHICS_VERIFY" in script_text:
+        return _verify_messages(script_text)
     lines = script_text.splitlines()
     text_dump = "tx-dump-current" in script_text
     text_apply = "tx-apply-" in script_text
     layer_mode = "lc-run" in script_text
+    tb_dump = "tb-dump-current" in script_text
+    tb_apply = "tb-apply-" in script_text
     proxy_mode = "pg-run" in script_text
-    messages = [] if text_dump or text_apply or layer_mode or proxy_mode else ["FONTFIX_READY"]
+    messages = [] if (
+        text_dump or text_apply or layer_mode or tb_dump or tb_apply or proxy_mode
+    ) else ["FONTFIX_READY"]
     pending = ""
     index = 0
     while index < len(lines):
@@ -71,7 +135,15 @@ def _messages_for(script_text: str) -> list[str]:
                 messages.append("invalid drawing")
                 messages.append("*" * 30)
                 break
-            if text_dump:
+            if tb_dump:
+                messages.extend(_TB_DUMP)
+                if TB_NOREADY not in payload:
+                    messages.append("TBDUMP_READY")
+            elif tb_apply:
+                # The function called on the next script line, as AutoCAD would run it.
+                called = re.search(r"tb-apply-(\d+)", lines[index + 1]) if index + 1 < len(lines) else None
+                messages.extend(_tb_apply_rows(script_text, called.group(1) if called else number))
+            elif text_dump:
                 messages.extend(_TEXT_DUMP)
             elif text_apply:
                 messages.append("TEXTAPPLY|=|AB1|=|ok")
@@ -102,6 +174,17 @@ def _messages_for(script_text: str) -> list[str]:
                 messages.append("PROXYGRAPHICS_RESULT|=|1|=|1")
             else:
                 messages.append("PROXYGRAPHICS_RESULT|=|0|=|1")
+        elif proxy_mode and "PROXYGRAPHICS_SAVE" in raw:
+            data = Path(pending).read_bytes() if pending and Path(pending).is_file() else b""
+            before = 1 if b"\nPROXYGRAPHICS=1" in data else 0
+            if before == 1:
+                messages.append("PROXYGRAPHICS_SAVE|=|NOT_REQUIRED")
+            elif os.environ.get("PG_FAKE_QSAVE_FAIL") == "1":
+                messages.append("PROXYGRAPHICS_SAVE|=|FAILED|=|simulated QSAVE failure")
+            else:
+                if b"\nPROXYGRAPHICS=1" not in data:
+                    Path(pending).write_bytes(data + b"\nPROXYGRAPHICS=1")
+                messages.append("PROXYGRAPHICS_SAVE|=|OK")
         elif _is_qsave(raw) and pending and Path(pending).is_file():
             path = Path(pending)
             data = path.read_bytes()
@@ -113,15 +196,26 @@ def _messages_for(script_text: str) -> list[str]:
             if not unchanged_font and not already_proxy:
                 if text_apply and b"\nTEXTAPPLIED" not in data:
                     data += b"\nTEXTAPPLIED"
+                if tb_apply and b"\nTBAPPLIED" not in data:
+                    data += b"\nTBAPPLIED"
                 if layer_mode and b"\nLAYERAPPLIED" not in data:
                     data += b"\nLAYERAPPLIED"
                 if proxy_mode and b"\nPROXYGRAPHICS=1" not in data:
                     data += b"\nPROXYGRAPHICS=1"
                 elif proxy_mode:
                     data += b"\nFORCEDSAVE"
-                if not (text_dump or text_apply or layer_mode or proxy_mode):
+                if not (text_dump or text_apply or layer_mode or proxy_mode or tb_dump or tb_apply):
                     data += b"\nQSAVED"
                 path.write_bytes(data)
+        elif upper in {"_.SAVEAS", "_SAVEAS"} and index + 3 < len(lines) and lines[index + 1].strip().upper() == "DXF":
+            # convert_batch form: _SAVEAS / DXF / <Enter> / "target". Test "DWGs" hold DXF text,
+            # so the bytes are written through unchanged.
+            target = lines[index + 3].strip().strip('"')
+            if pending and Path(pending).is_file():
+                Path(target).parent.mkdir(parents=True, exist_ok=True)
+                Path(target).write_bytes(Path(pending).read_bytes())
+            index += 4
+            continue
         elif upper in {"_.SAVEAS", "_SAVEAS"} and index + 2 < len(lines):
             target = lines[index + 2].strip().strip('"')
             if pending and Path(pending).is_file():

@@ -1,0 +1,18 @@
+{
+  "settings": {
+    "name_regex": "^[A-Z0-9][A-Z0-9_\\-]*$",
+    "unlisted_layers": "warning",
+    "layer0_entities": "error",
+    "empty_layers": "warning"
+  },
+  "rules": [
+    {"kind": "exact", "pattern": "0", "color": 7, "linetype": "Continuous"},
+    {"kind": "exact", "pattern": "Defpoints", "plot": false},
+    {"kind": "wildcard", "pattern": "A-WALL*", "color": [1, 7], "linetype": "Continuous",
+     "lineweight": [0.35, 0.5], "plot": true, "required": true, "description": "建築牆"},
+    {"kind": "wildcard", "pattern": "E-CABLE*", "color": "4|5", "linetype": ["Continuous", "DASHED"],
+     "lineweight": 0.25, "plot": true, "description": "電纜"},
+    {"kind": "regex", "pattern": "^S-COL-\\d{2}$", "color": "1-9", "lineweight": "default"},
+    {"kind": "forbidden", "pattern": "TEMP*", "description": "暫存圖層不得留在圖面"}
+  ]
+}
