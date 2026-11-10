@@ -15,3 +15,4 @@ artifacts/
 shiba_gentleman_cafe*.png
 # machine-specific settings (copy config.example.json to config.json)
 config.json
+.pytest_*_run.log
