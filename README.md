@@ -40,7 +40,7 @@ DWG -> accoreconsole.exe -> DXF -> ezdxf -> CSV / JSON / log
    copy config.example.json config.json
    ```
    - `config.json` 不進版本控制（已列入 `.gitignore`），每台電腦各自保存。
-   - `input_dir` / `output_dir` 預設為相對路徑 `input`、`output`（以專案根目錄為基準），可保留或改為絕對路徑。
+   - `input_dir` / `output_dir` 預設為 `D:\drawings\input`、`D:\drawings\output`，可改為其他絕對路徑，或相對路徑（以專案根目錄為基準）。
    - `accoreconsole`：範本預設為空字串，請填入本機 `accoreconsole.exe` 的路徑，例如：
      ```
      "accoreconsole": "C:\\Program Files\\Autodesk\\AutoCAD 2027\\accoreconsole.exe"
