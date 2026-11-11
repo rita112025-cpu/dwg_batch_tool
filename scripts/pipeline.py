@@ -10,6 +10,7 @@ import env_check
 import batch_convert
 import analyze_dxf
 import find_scada
+import fontfix
 
 DEFAULT_OPTS = dict(recursive=True, convert=True, analyze=True, scada=True,
                     csv=True, json=True, overwrite=False)
@@ -29,8 +30,10 @@ def run_multiformat(cfg, inputs=None, log=None, progress=None, stop_event=None, 
     out = resolve(cfg, 'output_dir').resolve()
     sources = [Path(p).resolve() for p in (inputs or [resolve(cfg, 'input_dir')])]
     if compare: sources.append(Path(compare).resolve())
-    if any(p == out or p.is_relative_to(out) for p in sources):
-        raise ValueError('Output must not contain the input folder or equal a selected input')
+    for source in sources:
+        problem = fontfix.overlap_problem(source, out)
+        if problem:
+            raise ValueError(problem)
     routes = {'.ifc': 'ifc', '.xlsx': 'excel', '.xlsm': 'excel', '.csv': 'excel', '.pdf': 'pdf', '.docx': 'docx', '.xml': 'navisworks', '.html': 'navisworks', '.htm': 'navisworks', '.dwg': 'cad', '.dxf': 'cad', '.nwd': 'unsupported'}
     files = set()
     for source in sources:
@@ -288,6 +291,11 @@ def run_pipeline(cfg, opts, log=None, progress=None, stop_event=None):
     def finish():
         summary["elapsed"] = time.time() - t0
         return summary
+
+    problem = fontfix.overlap_problem(resolve(cfg, "input_dir"), out)
+    if problem:
+        summary["fatal"] = problem
+        return finish()
 
     _log("INFO", "environment check")
     env = env_check.check(cfg)

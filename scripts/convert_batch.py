@@ -21,9 +21,10 @@ import uuid
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import fontfix
 import parallel
 from common import resolve, log_error, decode_console
-from convert_single import sha256, validate_dxf, safe_tmpdir, _terminate, publish_dxf
+from convert_single import sha256, validate_dxf, safe_tmpdir, _terminate, publish_dxf, tracked_popen
 
 OPEN_RE = re.compile(r"DWGBATCH_OPEN_(\d+)\|([^|\r\n]*)\|")
 DONE_RE = re.compile(r"DWGBATCH_DONE_(\d+)_")
@@ -73,6 +74,96 @@ def _decode(buf):
     return data[: len(data) // 2 * 2].decode("utf-16-le", errors="replace")
 
 
+class _Utf16Incremental:
+    """UTF-16-LE decode that matches ``_decode`` but only walks new bytes.
+
+    A trailing high surrogate is held back so the next chunk can complete the
+    pair. The returned text is still exactly ``_decode`` of the current buffer.
+    """
+
+    def __init__(self):
+        self._committed = 0
+        self._stable = ""
+        self.decoded_bytes = 0
+
+    def text_of(self, buf):
+        data = bytes(buf)
+        even = len(data) // 2 * 2
+        if even < self._committed:
+            self._committed = 0
+            self._stable = ""
+        commit = even
+        if commit - self._committed >= 2:
+            unit = int.from_bytes(data[commit - 2:commit], "little")
+            if 0xD800 <= unit <= 0xDBFF:
+                commit -= 2
+        if commit > self._committed:
+            piece = data[self._committed:commit]
+            self._stable += piece.decode("utf-16-le", errors="replace")
+            self.decoded_bytes += len(piece)
+            self._committed = commit
+        if even > self._committed:
+            tail = data[self._committed:even].decode("utf-16-le", errors="replace")
+            return self._stable + tail
+        return self._stable
+
+
+class _LiveOutput:
+    """Accumulated console text plus OPEN/DONE markers found so far.
+
+    Each pull decodes only the new UTF-16 payload and continues the marker
+    scan after the previous match, rewinding just far enough to finish a
+    marker that was split across reads. The text itself stays the full
+    decode, so slices and the final log file are unchanged.
+    """
+
+    _TOKEN = "DWGBATCH_"
+
+    def __init__(self):
+        self._dec = _Utf16Incremental()
+        self.text = ""
+        self.opens = []  # (start, end, index, name)
+        self.dones = []  # (start, end, index)
+        self._resume = 0
+
+    def pull(self, buf):
+        self.text = self._dec.text_of(buf)
+        self._scan()
+        return self.text
+
+    def _scan(self):
+        start = self._resume if self._resume <= len(self.text) else 0
+        seen_open = {(item[0], item[1]) for item in self.opens}
+        seen_done = {(item[0], item[1]) for item in self.dones}
+        for match in OPEN_RE.finditer(self.text, start):
+            span = match.span()
+            if span not in seen_open:
+                self.opens.append((span[0], span[1], int(match.group(1)), match.group(2)))
+                seen_open.add(span)
+        for match in DONE_RE.finditer(self.text, start):
+            span = match.span()
+            if span not in seen_done:
+                self.dones.append((span[0], span[1], int(match.group(1))))
+                seen_done.add(span)
+        self._resume = self._next_resume()
+
+    def _next_resume(self):
+        end = 0
+        if self.opens:
+            end = max(end, self.opens[-1][1])
+        if self.dones:
+            end = max(end, self.dones[-1][1])
+        tail = self.text[end:]
+        marker = tail.rfind(self._TOKEN)
+        if marker >= 0:
+            return end + marker
+        size = min(len(self._TOKEN) - 1, len(tail))
+        for length in range(size, 0, -1):
+            if tail.endswith(self._TOKEN[:length]):
+                return len(self.text) - length
+        return len(self.text)
+
+
 class _Reader(threading.Thread):
     def __init__(self, stream):
         super().__init__(daemon=True)
@@ -101,8 +192,7 @@ def _run_launch(jobs, accore, cfg, timeout, stop_event, on_start, finalize, tmpd
     lines.append("_QUIT")
     scr = tmpdir / f"batch_{tag}.scr"
     scr.write_bytes(("\n".join(lines) + "\n").encode("mbcs"))
-    proc = subprocess.Popen([str(accore), "/s", str(scr), "/l", "en-US"], stdout=subprocess.PIPE,
-                            stderr=subprocess.PIPE, stdin=subprocess.DEVNULL, shell=False)
+    proc = tracked_popen([str(accore), "/s", str(scr), "/l", "en-US"])
     rd, re_ = _Reader(proc.stdout), _Reader(proc.stderr)
     rd.start()
     re_.start()
@@ -110,25 +200,24 @@ def _run_launch(jobs, accore, cfg, timeout, stop_event, on_start, finalize, tmpd
     last_progress = time.time()
     fail_msg, stopped = "", False
     scan_from = 0
+    live = _LiveOutput()
 
     try:
         while consumed < len(jobs):
             time.sleep(0.2)
-            text = _decode(rd.buf)
-            for m in OPEN_RE.finditer(text):
-                i = int(m.group(1))
+            text = live.pull(rd.buf)
+            for _start, _end, i, name in live.opens:
                 if i not in opened:
-                    opened[i] = m.group(2)
+                    opened[i] = name
                     opened_at[i] = time.time()
                     jobs[i]["sha_before"] = jobs[i].get("sha_before") or sha256(jobs[i]["dwg"])
                     last_progress = time.time()
-            for m in DONE_RE.finditer(text):
-                i = int(m.group(1))
+            for _start, end, i in live.dones:
                 if i == consumed:
                     finalize(jobs[i], opened.get(i, ""), time.time() - opened_at.get(i, last_progress))
                     consumed += 1
                     last_progress = time.time()
-                    scan_from = m.end()
+                    scan_from = end
                     if consumed < len(jobs):
                         on_start(jobs[consumed])
             if consumed >= len(jobs):
@@ -141,7 +230,7 @@ def _run_launch(jobs, accore, cfg, timeout, stop_event, on_start, finalize, tmpd
                 break
             if proc.poll() is not None:
                 time.sleep(0.3)
-                if len(_decode(rd.buf)) == len(text):
+                if len(live.pull(rd.buf)) == len(text):
                     fail_msg = f"accoreconsole exited early (rc={proc.returncode})"
                     break
             elif time.time() - last_progress > timeout:
@@ -180,6 +269,7 @@ def convert_many(items, accore, cfg, timeout=300, overwrite=False, stop_event=No
     jobs = []
     tmpdir = safe_tmpdir(logs)
     copies = []
+    protected = fontfix.SourceIndex(Path(dwg) for dwg, _dxf in items)
     emit_lock = threading.Lock()
 
     def emit(rec):
@@ -201,6 +291,10 @@ def convert_many(items, accore, cfg, timeout=300, overwrite=False, stop_event=No
                 raise FileNotFoundError(f"DWG not found: {dwg}")
             if not os.access(dwg, os.R_OK):
                 raise PermissionError(f"DWG not readable: {dwg}")
+            if protected.hits(dxf):
+                rec["status"], rec["error"] = "ERROR", fontfix.REFUSE_SOURCE
+                jobs.append(dict(rec=rec, skip=True, index=idx, dwg=dwg, dxf=dxf))
+                continue
             if dxf.exists() and not overwrite:
                 rec["status"] = "SKIPPED_EXISTS"
                 jobs.append(dict(rec=rec, skip=True, index=idx))
@@ -242,6 +336,9 @@ def convert_many(items, accore, cfg, timeout=300, overwrite=False, stop_event=No
         tmp = job["tmp_path"]
         if opened_name and opened_name.casefold() != Path(job["spath"]).name.casefold():
             rec["status"], rec["error"] = "DXF_INVALID", f"wrong drawing opened ({opened_name})"
+            _rm(tmp)
+        elif protected.hits(job["dxf"]):
+            rec["status"], rec["error"] = "ERROR", fontfix.REFUSE_SOURCE
             _rm(tmp)
         elif not tmp.exists() or tmp.stat().st_size == 0:
             rec["status"], rec["error"] = "DXF_INVALID", "DXF not produced or 0 bytes"
@@ -297,14 +394,15 @@ def convert_many(items, accore, cfg, timeout=300, overwrite=False, stop_event=No
     try:
         todo = [j for j in jobs if not j["skip"]]
         stopped_at = [job for job in parallel.run_groups(parallel.split(todo, workers), _run_group) if job]
+        # Skip and pre-check rows are already known; a stop must not drop them from the report.
+        for j in jobs:
+            if j["skip"]:
+                emit(j["rec"])
         if stopped_at:
             first = min(stopped_at, key=lambda job: job["index"])
             results.append(dict(_new_rec(first["dwg"], first["dxf"]), status="STOPPED",
                                 error="stopped by user"))
             return _finish(results, copies)
-        for j in jobs:
-            if j["skip"]:
-                emit(j["rec"])
     finally:
         _finish(results, copies)
     return results

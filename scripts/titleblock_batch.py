@@ -41,13 +41,19 @@ def _file_key(src, input_dir):
 
 def _prepare(sources, logs, dests=None, overwrite=False):
     """Copy each source DWG to a temp file. Returns ``(jobs, temps)``."""
+    sources = list(sources)
+    protected = fontfix.SourceIndex(sources)
     jobs = []
     for index, src in enumerate(sources):
         dest = dests[index] if dests else None
         rec = {"file": str(src), "output": "" if dest is None else str(dest), "status": "",
                "blocks": 0, "changes": 0, "error": "", "elapsed_seconds": 0.0}
-        job = {"rec": rec, "src": src, "dest": dest, "skip": False}
-        if dest is not None and dest.exists() and not overwrite:
+        job = {"rec": rec, "src": src, "dest": dest, "skip": False, "protected": protected}
+        if dest is not None and protected.hits(dest):
+            rec["status"] = "FAILED"
+            rec["error"] = fontfix.REFUSE_SOURCE
+            job["skip"] = True
+        elif dest is not None and dest.exists() and not overwrite:
             rec["status"] = "SKIPPED"
             rec["error"] = "輸出已存在"
             job["skip"] = True

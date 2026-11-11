@@ -246,8 +246,69 @@ def format_still(style, primary, big):
     return f"{style} | 主={primary} | 大={big}"
 
 
+REFUSE_SOURCE = "拒絕覆寫原始檔"
+
+
+def _norm_key(path):
+    try:
+        resolved = Path(path).resolve()
+    except OSError:
+        resolved = Path(path).absolute()
+    return os.path.normcase(os.path.normpath(str(resolved)))
+
+
+def _same_or_inside(child, parent):
+    """True when ``child`` is ``parent`` or a path inside it. Comparison is case-folded."""
+    child_key = _norm_key(child)
+    parent_key = _norm_key(parent)
+    if child_key == parent_key:
+        return True
+    prefix = parent_key if parent_key.endswith(os.sep) else parent_key + os.sep
+    return child_key.startswith(prefix)
+
+
+def paths_overlap(left, right):
+    """True when the two paths are the same or either one is inside the other."""
+    try:
+        Path(left).resolve()
+        Path(right).resolve()
+    except OSError:
+        return False
+    return _same_or_inside(left, right) or _same_or_inside(right, left)
+
+
+def overlap_problem(input_path, output_path):
+    """Chinese error when the paths are the same or nested, else None.
+
+    Unlike ``directory_problem`` this does not require the input to exist, so a
+    file and a folder can be checked the same way. Empty text is left for the
+    caller that already asks the user to pick a folder.
+    """
+    src_text = str(input_path or "").strip()
+    dst_text = str(output_path or "").strip()
+    if not src_text or not dst_text:
+        return None
+    try:
+        src = Path(src_text).resolve()
+        dst = Path(dst_text).resolve()
+    except OSError as exc:
+        return f"無法讀取資料夾：{exc}"
+    if _norm_key(src) == _norm_key(dst):
+        return "輸出資料夾不可與輸入資料夾相同"
+    if _same_or_inside(dst, src):
+        return "輸出資料夾不可放在輸入資料夾裡面"
+    if _same_or_inside(src, dst):
+        return "輸入路徑不可放在輸出資料夾裡面"
+    return None
+
+
 def directory_problem(input_dir, output_dir):
-    """Return a Traditional Chinese error, or None when the two folders may be used."""
+    """Return a Traditional Chinese error, or None when the two folders may be used.
+
+    The same folder, an output inside the input, and an input inside the output
+    are all refused. A later publish step still rejects any destination that
+    resolves to a source file.
+    """
     src_text = str(input_dir or "").strip()
     dst_text = str(output_dir or "").strip()
     if not src_text:
@@ -255,21 +316,70 @@ def directory_problem(input_dir, output_dir):
     if not dst_text:
         return "請指定輸出資料夾"
     src = Path(src_text)
-    dst = Path(dst_text)
     if not src.is_dir():
         return "輸入資料夾不存在"
-    try:
-        src_resolved = src.resolve()
-        dst_resolved = dst.resolve()
-    except OSError as exc:
-        return f"無法讀取資料夾：{exc}"
-    if os.path.normcase(str(src_resolved)) == os.path.normcase(str(dst_resolved)):
-        return "輸出資料夾不可與輸入資料夾相同"
-    try:
-        dst_resolved.relative_to(src_resolved)
-    except ValueError:
-        return None
-    return "輸出資料夾不可放在輸入資料夾裡面"
+    return overlap_problem(src, dst_text)
+
+
+class SourceIndex:
+    """Resolved identities of every source in one batch, built once."""
+
+    def __init__(self, sources):
+        self.keys = set()
+        self.existing = []
+        for src in sources or ():
+            if src is None:
+                continue
+            path = Path(src)
+            self.keys.add(_norm_key(path))
+            try:
+                if path.exists():
+                    self.existing.append(path)
+            except OSError:
+                continue
+
+    def hits(self, dest):
+        if dest is None:
+            return False
+        dest_path = Path(dest)
+        if _norm_key(dest_path) in self.keys:
+            return True
+        try:
+            dest_exists = dest_path.exists()
+        except OSError:
+            return False
+        if not dest_exists:
+            return False
+        for src in self.existing:
+            try:
+                if os.path.samefile(dest_path, src):
+                    return True
+            except OSError:
+                continue
+        return False
+
+
+def output_hits_source(dest, sources):
+    """True when ``dest`` resolves to any path in ``sources`` (or the same file)."""
+    if dest is None:
+        return False
+    if isinstance(sources, SourceIndex):
+        return sources.hits(dest)
+    return SourceIndex(sources).hits(dest)
+
+
+def guarded_destination(job):
+    """Error text when publishing ``job`` would replace any source, else ``""``."""
+    dest = job.get("dest")
+    if dest is None:
+        return ""
+    protected = job.get("protected")
+    if not protected:
+        src = job.get("src")
+        protected = [src] if src is not None else ()
+    if output_hits_source(dest, protected):
+        return REFUSE_SOURCE
+    return ""
 
 
 # Missing-font repair accepts drawing templates as well as drawings.

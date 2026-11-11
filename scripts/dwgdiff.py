@@ -29,6 +29,7 @@ import ezdxf  # noqa: E402
 from ezdxf import bbox, recover  # noqa: E402
 
 import convert_batch  # noqa: E402
+import fontfix  # noqa: E402
 from common import log_error  # noqa: E402
 
 DRAWING_SUFFIXES = (".dwg", ".dxf")
@@ -504,6 +505,11 @@ def run(
     if not math.isfinite(tolerance) or tolerance < 0:
         summary["fatal"] = "座標容差必須是 0 以上的數字"
         return summary
+    for label, path in (("舊版", old), ("新版", new)):
+        problem = fontfix.overlap_problem(path, output_dir)
+        if problem:
+            summary["fatal"] = f"{label}：{problem}"
+            return summary
     try:
         pairs = pair_inputs(old, new, recursive)
     except ValueError as exc:
@@ -529,6 +535,11 @@ def run(
                 sides[(index, side)] = conversions.setdefault(path, target)
             elif path is not None:
                 sides[(index, side)] = path
+    source_paths = [path for _label, left, right in pairs for path in (left, right) if path is not None]
+    for target in conversions.values():
+        if fontfix.output_hits_source(target, source_paths):
+            summary["fatal"] = fontfix.REFUSE_SOURCE
+            return summary
     errors = _convert(conversions, accore, out_root, timeout, stop_event, on_progress)
 
     rows, details = [], []

@@ -664,3 +664,58 @@ def test_workers_field_reaches_batches_and_is_clamped(monkeypatch, tk_root, tmp_
         assert a._prepare_extract()["workers"] == expect
         assert a._workers() == expect
         assert a._current_cfg()["workers"] == expect
+
+
+def test_prepare_refuses_input_nested_in_output(monkeypatch, tk_root, tmp_path):
+    import app as appmod
+    monkeypatch.setattr(appmod.App, "_check_env", lambda self: None)
+    _fresh(tk_root)
+    window = appmod.App(tk_root)
+    window.env_ok = True
+    outer = tmp_path / "o"
+    inner = outer / "X"
+    inner.mkdir(parents=True)
+    window.v_in.set(str(inner))
+    window.v_out.set(str(outer))
+    with pytest.raises(appmod.TaskError) as caught:
+        window._prepare_dwg()
+    assert "輸入" in caught.value.message
+    with pytest.raises(appmod.TaskError):
+        window._prepare_versions()
+    with pytest.raises(appmod.TaskError):
+        window._prepare_fontfix()
+
+
+def test_closing_does_not_join_the_worker(monkeypatch, tk_root):
+    """Closing the window must not wait on the worker from the Tk thread."""
+    import app as appmod
+    monkeypatch.setattr(appmod.App, "_check_env", lambda self: None)
+    answers = {"yes": False}
+    monkeypatch.setattr(appmod.messagebox, "askyesno", lambda *args, **kwargs: answers["yes"])
+    _fresh(tk_root)
+    window = appmod.App(tk_root)
+    started = threading.Event()
+    release = threading.Event()
+
+    def work():
+        started.set()
+        release.wait(5)
+
+    window.worker = threading.Thread(target=work, daemon=True)
+    window.worker.start()
+    assert started.wait(2)
+    joins = []
+    window.worker.join = lambda *args, **kwargs: joins.append(True)
+    assert window.close_requested() is False
+    assert not window.stop_event.is_set()
+    assert joins == []
+    answers["yes"] = True
+    assert window.close_requested() is False
+    assert window.stop_event.is_set()
+    assert joins == []
+    assert window.poll_close() is False
+    release.set()
+    deadline = time.time() + 2
+    while window.worker.is_alive() and time.time() < deadline:
+        time.sleep(0.01)
+    assert window.poll_close() is True

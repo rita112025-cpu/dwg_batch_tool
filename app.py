@@ -5,6 +5,7 @@ import queue
 import re
 import sys
 import threading
+import time
 import tkinter as tk
 import tkinter.font as tkfont
 from pathlib import Path
@@ -15,6 +16,7 @@ ROOT = Path(__file__).resolve().parent
 os.environ.setdefault("EZDXF_DISABLE_C_EXT", "1")
 sys.path.insert(0, str(ROOT / "scripts"))
 import common  # noqa: E402
+import convert_single  # noqa: E402
 import env_check  # noqa: E402
 import pipeline  # noqa: E402
 import dwg_version  # noqa: E402
@@ -211,6 +213,10 @@ class App:
         self.stop_event = threading.Event()
         self.worker = None
         self._can_stop = False
+        self._closing = False
+        self._close_polling = False
+        self._close_started = 0.0
+        self._children_released = False
         self.env_ok = False
         self.summary = None
         self.analysis_inputs = []
@@ -1230,6 +1236,9 @@ class App:
             raise TaskError("輸入資料夾不存在", src or "請選擇輸入資料夾")
         if not dst:
             raise TaskError("請指定輸出資料夾", "")
+        problem = fontfix.overlap_problem(src, dst)
+        if problem:
+            raise TaskError("路徑錯誤", problem)
         return dict(input_dir=src, output_dir=dst, recursive=self.opts["recursive"].get())
 
     def _prepare_fontfix(self):
@@ -1318,6 +1327,9 @@ class App:
             raise TaskError("輸入資料夾不存在", cfg["input_dir"])
         if not cfg["output_dir"]:
             raise TaskError("請指定輸出資料夾", "")
+        problem = fontfix.overlap_problem(cfg["input_dir"], cfg["output_dir"])
+        if problem:
+            raise TaskError("路徑錯誤", problem)
         if not cfg["keywords"] and self.opts["scada"].get():
             raise TaskError("沒有關鍵字", "SCADA 搜尋需要至少一個關鍵字")
         return dict(cfg=cfg, opts={key: var.get() for key, var in self.opts.items()})
@@ -1328,6 +1340,10 @@ class App:
         inputs = self.analysis_inputs or [cfg["input_dir"]]
         if not cfg["output_dir"] or any(not Path(p).exists() for p in inputs):
             raise TaskError("路徑錯誤", "請選擇存在的輸入檔案／資料夾，並指定輸出資料夾。")
+        for item in inputs:
+            problem = fontfix.overlap_problem(item, cfg["output_dir"])
+            if problem:
+                raise TaskError("路徑錯誤", problem)
         return dict(cfg=cfg, inputs=inputs)
 
     def _prepare_diff(self):
@@ -1340,10 +1356,9 @@ class App:
         # dwgdiff writes converted DXFs under the output folder; inside an input tree a later
         # run would scan them as inputs.
         for label, path in (("舊版", old), ("新版", new)):
-            if Path(path).is_dir():
-                problem = fontfix.directory_problem(path, dst)
-                if problem:
-                    raise TaskError("路徑錯誤", f"{label}：{problem}")
+            problem = fontfix.directory_problem(path, dst) if Path(path).is_dir() else fontfix.overlap_problem(path, dst)
+            if problem:
+                raise TaskError("路徑錯誤", f"{label}：{problem}")
         raw = self.v_df_tol.get().strip()
         try:
             tolerance = float(raw)
@@ -1981,6 +1996,46 @@ class App:
             pass
         self.root.after(100, self._poll)
 
+    def close_requested(self):
+        """Ask to leave. Returns True only when the window may be destroyed immediately.
+
+        A running worker is told to stop. The Tk thread keeps polling; it does not
+        wait on the worker.
+        """
+        if self._closing:
+            return False
+        if not self._busy():
+            return True
+        if not messagebox.askyesno("處理中", "仍在處理，確定要停止並離開？"):
+            return False
+        self._closing = True
+        self._close_started = time.monotonic()
+        self._children_released = False
+        self.stop_event.set()
+        try:
+            self._set_status("warning", "正在停止，請稍候…")
+            self.btn_stop.configure(state="disabled")
+        except tk.TclError:
+            pass
+        return False
+
+    def poll_close(self):
+        """One non-blocking shutdown step. True when the window should close.
+
+        After a short grace period, child consoles are stopped so the worker can
+        finish. Temp copies are removed once the worker has left, or when the
+        wait has gone on long enough that the window must close anyway.
+        """
+        alive = self.worker is not None and self.worker.is_alive()
+        waited = time.monotonic() - self._close_started
+        if alive and not self._children_released and waited >= 3:
+            self._children_released = True
+            convert_single.release_children()
+        if alive and waited < 20:
+            return False
+        convert_single.cleanup_runtime()
+        return True
+
 
 def main():
     root = tk.Tk()
@@ -1992,12 +2047,21 @@ def main():
     app = App(root)
 
     def on_close():
-        if app._busy():
-            if not messagebox.askyesno("處理中", "仍在處理，確定要停止並離開？"):
-                return
-            app.stop_event.set()
-            app.worker.join(timeout=20)  # lets the running accoreconsole be terminated cleanly
-        root.destroy()
+        if app.close_requested():
+            convert_single.cleanup_runtime()
+            root.destroy()
+            return
+        if not app._closing or app._close_polling:
+            return
+
+        def tick():
+            if app.poll_close():
+                root.destroy()
+            else:
+                root.after(100, tick)
+
+        app._close_polling = True
+        root.after(100, tick)
     root.protocol("WM_DELETE_WINDOW", on_close)
     root.mainloop()
 

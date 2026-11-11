@@ -22,8 +22,8 @@ import fontfix  # noqa: E402
 import layerclass  # noqa: E402
 import parallel  # noqa: E402
 from common import decode_console, log_error  # noqa: E402
-from convert_batch import DONE_RE, OPEN_RE, _Reader, _decode, _has_blocking_messagebox  # noqa: E402
-from convert_single import _terminate, copy_hashed, publish_dxf, safe_tmpdir, sha256  # noqa: E402
+from convert_batch import _LiveOutput, _Reader, _has_blocking_messagebox  # noqa: E402
+from convert_single import _terminate, copy_hashed, publish_dxf, safe_tmpdir, sha256, tracked_popen  # noqa: E402
 
 
 def _stamp():
@@ -67,13 +67,7 @@ def _run_launch(jobs, accore, lisp_path, script_text, timeout, stop_event, on_fi
     command = [str(accore), "/s", str(scr), "/l", "en-US"]
     if str(accore).lower().endswith(".py"):
         command.insert(0, sys.executable)
-    proc = subprocess.Popen(
-        command,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        stdin=subprocess.DEVNULL,
-        shell=False,
-    )
+    proc = tracked_popen(command)
     reader, err_reader = _Reader(proc.stdout), _Reader(proc.stderr)
     reader.start()
     err_reader.start()
@@ -82,29 +76,28 @@ def _run_launch(jobs, accore, lisp_path, script_text, timeout, stop_event, on_fi
     fail_msg, stopped = "", False
     scan_from = 0
     seen_chars = 0
+    live = _LiveOutput()
     try:
         while consumed < len(jobs):
             time.sleep(0.2)
-            text = _decode(reader.buf)
+            text = live.pull(reader.buf)
             if len(text) != seen_chars:
                 last_progress = time.time()
                 seen_chars = len(text)
-            for match in OPEN_RE.finditer(text):
-                index = int(match.group(1))
+            for _start, _end, index, name in live.opens:
                 if index not in opened and index < len(jobs):
-                    opened[index] = match.group(2)
+                    opened[index] = name
                     opened_at[index] = time.time()
                     last_progress = time.time()
                     on_file_start(jobs[index])
-            for match in DONE_RE.finditer(text):
-                index = int(match.group(1))
+            for _start, end, index in live.dones:
                 if index == consumed and index < len(jobs):
                     jobs[index]["opened_name"] = opened.get(index, "")
-                    jobs[index]["console"] = text[scan_from:match.end()]
+                    jobs[index]["console"] = text[scan_from:end]
                     jobs[index]["elapsed"] = time.time() - opened_at.get(index, last_progress)
                     consumed += 1
                     last_progress = time.time()
-                    scan_from = match.end()
+                    scan_from = end
             if consumed >= len(jobs):
                 break
             if stop_event is not None and stop_event.is_set():
@@ -115,7 +108,7 @@ def _run_launch(jobs, accore, lisp_path, script_text, timeout, stop_event, on_fi
                 break
             if proc.poll() is not None:
                 time.sleep(0.3)
-                if len(_decode(reader.buf)) == len(text):
+                if len(live.pull(reader.buf)) == len(text):
                     fail_msg = f"accoreconsole 提前結束（rc={proc.returncode}）"
                     break
             elif time.time() - last_progress > timeout:
@@ -204,11 +197,17 @@ def _prepare(input_dir, output_dir, logs, recursive, overwrite, dry_run):
     src_root = Path(input_dir)
     dst_root = Path(output_dir)
     jobs = []
+    protected = fontfix.SourceIndex(files)
     for src in files:
         dest = fontfix.output_for(src, src_root, dst_root, recursive)
         rec = _blank_rec(src, dest)
-        job = {"rec": rec, "src": src, "dest": dest, "src_root": src_root, "skip": False}
-        if dest.exists() and not overwrite and not dry_run:
+        job = {"rec": rec, "src": src, "dest": dest, "src_root": src_root, "skip": False,
+               "protected": protected}
+        if protected.hits(dest):
+            rec["status"] = "FAILED"
+            rec["error"] = fontfix.REFUSE_SOURCE
+            job["skip"] = True
+        elif dest.exists() and not overwrite and not dry_run:
             rec["status"] = "SKIPPED"
             job["skip"] = True
         jobs.append(job)
@@ -248,6 +247,9 @@ def _check_source(job):
 
 
 def _publish(job):
+    refused = fontfix.guarded_destination(job)
+    if refused:
+        return False, refused
     produced = job["produced"]
     if not produced.exists() or produced.stat().st_size < 6 or not fontfix.is_dwg_file(produced):
         time.sleep(0.3)

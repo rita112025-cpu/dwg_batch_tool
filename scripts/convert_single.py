@@ -8,6 +8,7 @@ Verified behaviour (AutoCAD 2027 accoreconsole):
     ASCII temp name and Python renames it to the final (possibly Chinese) path afterwards.
   * SAVEAS -> DXF -> <Enter> (16 decimals) -> path ; version follows the current format (2018).
 """
+import atexit
 import hashlib
 import os
 import errno
@@ -15,12 +16,14 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import uuid
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from common import load_config, resolve, log_error, decode_console
+import fontfix
 
 import ezdxf
 
@@ -84,12 +87,129 @@ def _script_safe(p):
     return s.isascii() and " " not in s
 
 
+# Per-user temp copies only. A world-readable public folder is never a candidate.
+_STALE_TEMP_SECONDS = 24 * 60 * 60
+_registry_lock = threading.Lock()
+_tracked_procs = []
+_tracked_temps = []
+
+
+def _norm_key(path):
+    try:
+        resolved = Path(path).resolve()
+    except OSError:
+        resolved = Path(path)
+    return os.path.normcase(os.path.normpath(str(resolved)))
+
+
+def track_process(proc):
+    """Remember an accoreconsole (or test double) so shutdown can stop it."""
+    with _registry_lock:
+        _tracked_procs.append(proc)
+
+
+def track_temp(path):
+    """Remember a temp file or directory so shutdown can delete it."""
+    with _registry_lock:
+        _tracked_temps.append(Path(path))
+
+
+def tracked_popen(command):
+    """Start a console process and register it for best-effort shutdown."""
+    proc = subprocess.Popen(
+        command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        stdin=subprocess.DEVNULL,
+        shell=False,
+    )
+    track_process(proc)
+    return proc
+
+
+def release_children():
+    """Stop every process this run started that is still alive. Never raises."""
+    with _registry_lock:
+        procs = list(_tracked_procs)
+    for proc in procs:
+        try:
+            if proc.poll() is None:
+                _terminate(proc)
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def cleanup_runtime():
+    """Stop tracked child processes and delete tracked temp copies. Best effort."""
+    release_children()
+    with _registry_lock:
+        temps = list(_tracked_temps)
+        _tracked_temps.clear()
+        _tracked_procs.clear()
+    for path in reversed(temps):
+        try:
+            if path.is_symlink() or path.is_file():
+                path.unlink(missing_ok=True)
+            elif path.is_dir():
+                shutil.rmtree(path, ignore_errors=True)
+        except OSError:
+            pass
+
+
+def _user_temp_roots():
+    roots = [Path(tempfile.gettempdir()) / "dwg_batch_tool"]
+    local = os.environ.get("LOCALAPPDATA")
+    if local:
+        extra = Path(local) / "dwg_batch_tool"
+        if _norm_key(extra) != _norm_key(roots[0]):
+            roots.append(extra)
+    return roots
+
+
+def _sweep_stale_temps(max_age=_STALE_TEMP_SECONDS, keep=()):
+    """Delete per-user temp folders that have sat unused. Failures are ignored.
+
+    ``keep`` is the folder this call is about to use. It is left alone even when
+    its timestamp is old, so a second run does not remove the first run's copies.
+    """
+    with _registry_lock:
+        active = {_norm_key(path) for path in _tracked_temps}
+    active.update(_norm_key(path) for path in keep)
+    now = time.time()
+    for root in _user_temp_roots():
+        try:
+            if not root.is_dir():
+                continue
+            children = list(root.iterdir())
+        except OSError:
+            continue
+        for child in children:
+            try:
+                if _norm_key(child) in active:
+                    continue
+                if now - child.stat().st_mtime <= max_age:
+                    continue
+                if child.is_symlink() or child.is_file():
+                    child.unlink(missing_ok=True)
+                elif child.is_dir():
+                    shutil.rmtree(child, ignore_errors=True)
+            except OSError:
+                continue
+
+
 def safe_tmpdir(logs):
     """A temp folder whose path is ASCII and has no spaces: the SAVEAS filename prompt splits on
-    spaces and the script is read with the ANSI code page, so the temp target must be plain."""
+    spaces and the script is read with the ANSI code page, so the temp target must be plain.
+
+    Candidates are the output log folder and per-user temp locations. A shared public
+    profile directory is not used. The returned folder is registered so a later
+    shutdown can remove the DWG copies left in it.
+    """
     token = hashlib.sha256(str(Path(logs).resolve()).encode()).hexdigest()[:16]
-    cands = [logs / "tmp", Path(tempfile.gettempdir()) / "dwg_batch_tool" / token,
-             Path(os.environ.get("PUBLIC", r"C:\Users\Public")) / "dwg_batch_tool" / token]
+    roots = _user_temp_roots()
+    _sweep_stale_temps(keep=[root / token for root in roots])
+    cands = [Path(logs) / "tmp"]
+    cands.extend(root / token for root in roots)
     for c in cands:
         try:
             c.mkdir(parents=True, exist_ok=True)
@@ -97,8 +217,12 @@ def safe_tmpdir(logs):
             continue
         for form in (c, Path(_short_path(c))):
             if _script_safe(form) and os.access(form, os.W_OK):
+                track_temp(form)
                 return form
     raise OSError("no script-safe temp folder (ASCII, no spaces) available")
+
+
+atexit.register(cleanup_runtime)
 
 
 def publish_dxf(source, destination):
@@ -133,8 +257,7 @@ def _terminate(proc):
 def run_accore(cmd, timeout, stop_event=None):
     """Run accoreconsole via Popen. Returns (returncode, stdout, stderr, why)
     where why is '', 'timeout' or 'stopped'."""
-    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                            stdin=subprocess.DEVNULL, shell=False)
+    proc = tracked_popen(cmd)
     deadline = time.time() + timeout
     why = ""
     while True:
@@ -172,6 +295,12 @@ def convert(dwg, dxf, accore, cfg=None, timeout=300, overwrite=False, stop_event
             raise FileNotFoundError(f"DWG not found: {dwg}")
         if not os.access(dwg, os.R_OK):
             raise PermissionError(f"DWG not readable: {dwg}")
+        if fontfix.output_hits_source(dxf, [dwg]):
+            rec["status"] = "ERROR"
+            rec["error"] = fontfix.REFUSE_SOURCE
+            rec["elapsed_seconds"] = round(time.time() - t0, 2)
+            log_error(cfg, f"{rec['source']} -> {rec['status']} rc={rec['return_code']} {rec['error']}")
+            return rec
         if dxf.exists() and not overwrite:
             rec["status"] = "SKIPPED_EXISTS"
             return rec

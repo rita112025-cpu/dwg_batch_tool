@@ -8,6 +8,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from common import load_config, resolve, log_error
 from convert_batch import convert_many
+import fontfix
 from parallel import clamp_workers
 
 FIELDS = ["source", "output", "status", "return_code", "file_size", "elapsed_seconds", "error"]
@@ -28,11 +29,15 @@ def run(cfg, log=None, progress=None, stop_event=None):
     stats = dict(total=0, ok=0, failed=0, skipped=0, stopped=False, fatal="", results=[],
                  failed_files=[])
     accore = cfg["accoreconsole"]
+    inp, out = resolve(cfg, "input_dir"), resolve(cfg, "output_dir")
+    problem = fontfix.overlap_problem(inp, out)
+    if problem:
+        stats["fatal"] = problem
+        return stats
     if not Path(accore).exists():
         log_error(cfg, f"accoreconsole not found: {accore}")
         stats["fatal"] = f"accoreconsole not found: {accore}"
         return stats
-    inp, out = resolve(cfg, "input_dir"), resolve(cfg, "output_dir")
     files = list_dwg(cfg)
     stats["total"] = len(files)
     logs = out / "logs"
