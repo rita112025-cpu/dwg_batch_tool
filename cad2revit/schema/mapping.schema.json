@@ -1,0 +1,61 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "cad2revit.mapping.v1",
+  "title": "CAD to Revit mapping",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "layer_rules", "block_rules"],
+  "properties": {
+    "schema": {"const": "cad2revit.mapping.v1"},
+    "layer_rules": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/layerRule"}
+    },
+    "block_rules": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/blockRule"}
+    },
+    "defaults": {
+      "type": "object",
+      "additionalProperties": {"$ref": "#/$defs/parameters"}
+    }
+  },
+  "$defs": {
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "width": {"type": "number", "exclusiveMinimum": 0},
+        "height": {"type": "number", "exclusiveMinimum": 0},
+        "diameter": {"type": "number", "exclusiveMinimum": 0},
+        "unit": {"enum": ["mm", "cm", "m", "in", "ft"]}
+      }
+    },
+    "layerRule": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "pattern", "category"],
+      "properties": {
+        "id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$"},
+        "pattern": {"type": "string", "minLength": 1, "maxLength": 500},
+        "category": {"type": "string", "minLength": 1},
+        "family": {"type": "string", "minLength": 1},
+        "type": {"type": "string", "minLength": 1},
+        "parameters": {"$ref": "#/$defs/parameters"}
+      }
+    },
+    "blockRule": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "pattern", "category", "family", "type"],
+      "properties": {
+        "id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$"},
+        "pattern": {"type": "string", "minLength": 1, "maxLength": 500},
+        "category": {"type": "string", "minLength": 1},
+        "family": {"type": "string", "minLength": 1},
+        "type": {"type": "string", "minLength": 1},
+        "parameters": {"$ref": "#/$defs/parameters"}
+      }
+    }
+  }
+}

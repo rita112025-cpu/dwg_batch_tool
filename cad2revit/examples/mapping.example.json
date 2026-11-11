@@ -1,0 +1,55 @@
+{
+  "schema": "cad2revit.mapping.v1",
+  "layer_rules": [
+    {
+      "id": "tray-main",
+      "pattern": "(?i)^E-TRAY-.+",
+      "category": "Cable Tray",
+      "family": "Cable Tray with Fittings",
+      "type": "Ladder 300x100",
+      "parameters": {
+        "width": 300,
+        "height": 100,
+        "unit": "mm"
+      }
+    },
+    {
+      "id": "conduit-branch",
+      "pattern": "(?i)^E-COND-.+",
+      "category": "Conduit",
+      "family": "Conduit with Fittings",
+      "type": "Rigid 25",
+      "parameters": {
+        "diameter": 25,
+        "unit": "mm"
+      }
+    }
+  ],
+  "block_rules": [
+    {
+      "id": "panel-block",
+      "pattern": "(?i)^EQ-PANEL-.+",
+      "category": "Electrical Equipment",
+      "family": "Generic Panel",
+      "type": "Recessed"
+    },
+    {
+      "id": "light-block",
+      "pattern": "(?i)^EQ-LITE-.+",
+      "category": "Lighting Fixtures",
+      "family": "Generic Downlight",
+      "type": "Round"
+    }
+  ],
+  "defaults": {
+    "Cable Tray": {
+      "width": 300,
+      "height": 100,
+      "unit": "mm"
+    },
+    "Conduit": {
+      "diameter": 25,
+      "unit": "mm"
+    }
+  }
+}
