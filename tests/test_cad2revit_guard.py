@@ -1,5 +1,6 @@
 """Both-direction folder guard, including when the shared helper allows the reverse."""
 
+import os
 from pathlib import Path
 
 import pytest
@@ -8,9 +9,14 @@ from cad2revit import guard
 
 
 def test_prefix_does_not_treat_a_longer_name_as_nested():
-    assert guard._is_inside("/data/out", "/data")
-    assert not guard._is_inside("/data/output", "/data/out")
-    assert not guard._is_inside("/data/in", "/data/in")
+    """Keys are already normpath'd, so the separator is the platform one."""
+    sep = os.sep
+    parent = sep + "data"
+    child = parent + sep + "out"
+    longer = parent + sep + "output"
+    assert guard._is_inside(child, parent)
+    assert not guard._is_inside(longer, child)
+    assert not guard._is_inside(parent, parent)
 
 
 def test_same_folder_output_inside_input_and_input_inside_output(tmp_path, monkeypatch):
