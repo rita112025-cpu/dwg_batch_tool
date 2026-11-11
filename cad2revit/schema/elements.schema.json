@@ -1,0 +1,65 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "cad2revit.elements.v1",
+  "title": "Classified CAD elements for a later Revit placement step",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "tool",
+    "tool_version",
+    "generated_at",
+    "status",
+    "source",
+    "conversion",
+    "mapping",
+    "counts",
+    "elements",
+    "unclassified",
+    "annotations",
+    "unmatched"
+  ],
+  "properties": {
+    "schema": {"const": "cad2revit.elements.v1"},
+    "tool": {"const": "cad2revit"},
+    "tool_version": {"type": "string"},
+    "generated_at": {"type": "string"},
+    "status": {"enum": ["OK", "ERROR", "CONVERSION_FAILED", "SOURCE_MODIFIED"]},
+    "error": {"type": "string"},
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["relative_path", "sha256", "sha256_after", "unchanged"],
+      "properties": {
+        "relative_path": {"type": "string"},
+        "sha256": {"type": "string"},
+        "sha256_after": {"type": "string"},
+        "unchanged": {"type": "boolean"}
+      }
+    },
+    "conversion": {"type": "object"},
+    "drawing": {"type": ["object", "null"]},
+    "mapping": {
+      "type": "object",
+      "required": ["file_name", "sha256"],
+      "properties": {
+        "file_name": {"type": "string"},
+        "sha256": {"type": "string"}
+      }
+    },
+    "layouts": {"type": ["object", "null"]},
+    "counts": {"type": "object"},
+    "skipped_entity_types": {"type": "object"},
+    "elements": {"type": "array"},
+    "unclassified": {"type": "array"},
+    "annotations": {"type": "array"},
+    "unmatched": {
+      "type": "object",
+      "required": ["layers", "blocks"],
+      "properties": {
+        "layers": {"type": "array"},
+        "blocks": {"type": "array"}
+      }
+    }
+  }
+}
