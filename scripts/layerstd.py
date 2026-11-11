@@ -34,6 +34,7 @@ from pathlib import Path
 import ezdxf
 
 from common import log_error
+import fontfix
 
 STANDARD_FIELDS = ["kind", "pattern", "value", "color", "linetype", "lineweight", "plot",
                    "required", "description"]
@@ -569,6 +570,10 @@ def run(input_dir, output_dir, standard_path, accore="", *, recursive=True, over
         return summary
     if not Path(input_dir).is_dir():
         summary["fatal"] = f"輸入資料夾不存在：{input_dir}"
+        return summary
+    problem = fontfix.overlap_problem(input_dir, output_dir)
+    if problem:
+        summary["fatal"] = problem
         return summary
     out_dir = Path(output_dir) / REPORT_DIR
     files = scan_inputs(input_dir, recursive)

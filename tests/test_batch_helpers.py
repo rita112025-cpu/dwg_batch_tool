@@ -53,6 +53,24 @@ def test_publish_moves_the_drawing(publish, tmp_path):
     assert job["dest"].read_bytes() == HEADER
 
 
+def test_publish_refuses_any_source_in_the_batch(tmp_path):
+    other = tmp_path / "other.dwg"
+    other.write_bytes(HEADER + b"KEEP")
+    job = _job(tmp_path)
+    job["produced"].write_bytes(HEADER + b"NEW")
+    job["tmp_in"].write_bytes(HEADER + b"NEW")
+    job["dest"] = other
+    job["protected"] = [job["src"], other]
+    before = other.read_bytes()
+    for publish in (fontfix_batch._publish_job, layerbatch._publish, textbatch._publish):
+        ok, err = publish(job)
+        assert ok is False and "原始" in err
+        assert other.read_bytes() == before
+    ok, err = textbatch._copy_unchanged(job)
+    assert ok is False and "原始" in err
+    assert other.read_bytes() == before
+
+
 def test_copy_unchanged(tmp_path):
     job = _job(tmp_path)
     job["tmp_in"].write_bytes(HEADER)

@@ -143,6 +143,11 @@ def test_directory_rules(tmp_path):
     assert "相同" in fontfix.directory_problem(src, src)
     nested = src / "out"
     assert "裡面" in fontfix.directory_problem(src, nested)
+    outer = tmp_path / "outer"
+    inner = outer / "X"
+    inner.mkdir(parents=True)
+    assert "輸入" in fontfix.directory_problem(inner, outer)
+    assert fontfix.overlap_problem(inner / "a.dwg", outer)
     assert "不存在" in fontfix.directory_problem(tmp_path / "missing", dst)
     assert fontfix.directory_problem("", dst)
     assert fontfix.directory_problem(src, "  ")
