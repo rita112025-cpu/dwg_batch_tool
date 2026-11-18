@@ -22,7 +22,7 @@ import fontfix  # noqa: E402
 import layerclass  # noqa: E402
 import parallel  # noqa: E402
 from common import decode_console, log_error  # noqa: E402
-from convert_batch import DONE_RE, OPEN_RE, _Reader, _decode, _has_blocking_messagebox  # noqa: E402
+from convert_batch import DONE_RE, OPEN_RE, _Reader, _decode, _has_blocking_messagebox, blocking_failure_message  # noqa: E402
 from convert_single import _terminate, copy_hashed, publish_dxf, safe_tmpdir, sha256  # noqa: E402
 
 
@@ -111,7 +111,7 @@ def _run_launch(jobs, accore, lisp_path, script_text, timeout, stop_event, on_fi
                 stopped = True
                 break
             if _has_blocking_messagebox(text[scan_from:]):
-                fail_msg = "AutoCAD 顯示錯誤對話框後停止（圖檔可能損壞或無法開啟）"
+                fail_msg = blocking_failure_message(text[scan_from:])
                 break
             if proc.poll() is not None:
                 time.sleep(0.3)
