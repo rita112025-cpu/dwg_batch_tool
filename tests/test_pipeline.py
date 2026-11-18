@@ -190,3 +190,16 @@ def test_20_messagebox_classifier():
     ro = f"{stars}MessageBox{'*' * 20}\nAutoCAD 警告\nx.dwg 目前使用中或是唯讀。\n>>>Responding: Yes.\n{'*' * 30}\n"
     bad = f"{stars}MessageBox{'*' * 20}\nAutoCAD 訊息\n圖檔無效。\n>>>Responding: OK.\n{'*' * 30}\n"
     assert not f(ro) and f(bad) and f(ro + bad) and not f("no box here")
+
+
+def test_messagebox_text_is_quoted_in_failure_message():
+    from convert_batch import blocking_failure_message, blocking_message_text
+    stars = "*" * 24
+    bad = f"{stars}MessageBox{'*' * 20}\nAutoCAD 訊息\n圖檔無效。\n>>>Responding: OK.\n{'*' * 30}\n"
+    ro = f"{stars}MessageBox{'*' * 20}\nAutoCAD 警告\nx.dwg 目前使用中或是唯讀。\n>>>Responding: Yes.\n{'*' * 30}\n"
+    assert blocking_message_text(bad) == "圖檔無效。"
+    assert blocking_message_text(ro) == ""
+    msg = blocking_failure_message(bad)
+    assert "圖檔無效。" in msg and msg.startswith("AutoCAD 顯示錯誤對話框後停止")
+    assert "圖檔無效" not in blocking_failure_message("MessageBox without a frame")
+
