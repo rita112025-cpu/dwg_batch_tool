@@ -68,6 +68,25 @@ def _has_blocking_messagebox(text):
     return "MessageBox" in _MSGBOX.sub("", text)
 
 
+def blocking_message_text(text):
+    """Return AutoCAD's own wording of the first blocking MessageBox in ``text`` ("" when there is none)."""
+    for m in _MSGBOX.finditer(text):
+        if _BENIGN.search(m.group(1)):
+            continue
+        lines = [ln.strip() for ln in m.group(1).splitlines() if ln.strip()]
+        lines = [ln for ln in lines if not ln.startswith(">>>") and ln not in {"AutoCAD 訊息", "AutoCAD Message"}]
+        if lines:
+            return " ".join(lines)
+    return ""
+
+
+def blocking_failure_message(text):
+    """Failure text for a stalled launch, quoting AutoCAD's dialog when it can be read."""
+    detail = blocking_message_text(text)
+    quoted = f"：「{detail}」" if detail else ""
+    return f"AutoCAD 顯示錯誤對話框後停止{quoted}（圖檔可能損壞或無法開啟；請在 AutoCAD 用 RECOVER 試修，或重新取得原檔）"
+
+
 def _decode(buf):
     data = bytes(buf)
     return data[: len(data) // 2 * 2].decode("utf-16-le", errors="replace")
