@@ -125,6 +125,9 @@ def _terminate(proc):
     except Exception:  # noqa: BLE001
         try:
             subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)], capture_output=True)
+        except Exception:  # noqa: BLE001
+            pass  # taskkill missing/failed: still fall through to kill()
+        try:
             proc.kill()
         except Exception:  # noqa: BLE001
             pass
