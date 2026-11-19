@@ -14,6 +14,7 @@ ROOT = Path(__file__).resolve().parent
 # ezdxf's compiled .pyd accelerators are unsigned and Windows App Control blocks them; use pure Python.
 os.environ.setdefault("EZDXF_DISABLE_C_EXT", "1")
 sys.path.insert(0, str(ROOT / "scripts"))
+import chain  # noqa: E402
 import common  # noqa: E402
 import env_check  # noqa: E402
 import pipeline  # noqa: E402
@@ -1805,6 +1806,8 @@ class App:
             self._log("INFO", f"批次開始（{total} 項）：{names}")
 
         def work():
+            carry = {}           # DWG outputs this batch produced; later DWG steps continue from them
+            chained = False      # True once a DWG step produced output for the next one to build on
             for index, (key, params) in enumerate(prepared, 1):
                 if self.stop_event.is_set():
                     for rest_key, _rest in prepared[index - 1:]:
@@ -1823,11 +1826,28 @@ class App:
                         stage = TASK_LABELS[_key]
                     self.q.put(("task_progress", _key, stage, i, n, current))
 
+                step = chain.is_chain_step(key, params)
+                stage = None
                 try:
-                    result = self._runners[key](params, log, progress)
+                    if step and chained and not carry:
+                        result = dict(fatal="上一步的 DWG 都失敗，沒有可接續的檔案，本步驟未執行")
+                    else:
+                        if step and chained:
+                            stage = chain.build_stage(carry, params["dst"])
+                            params = dict(params, src=str(stage), overwrite=True, recursive=True)
+                            log("INFO", f"接續上一步的輸出（{len(carry)} 個檔案）")
+                        result = self._runners[key](params, log, progress)
                 except Exception as exc:  # noqa: BLE001
                     result = dict(fatal=f"{type(exc).__name__}: {exc}")
                     self._log_crash(key, params, result["fatal"])
+                finally:
+                    if stage is not None:
+                        problem = chain.remove_stage(stage)
+                        if problem:
+                            log("WARN", f"暫存資料夾刪除失敗，保留：{stage}（{problem}）")
+                if step and isinstance(result, dict) and not result.get("fatal"):
+                    chain.update_carry(carry, result.get("results"), params["dst"])
+                    chained = chained or bool(carry)
                 self.q.put(("task_result", key, result))
             self.q.put(("batch_done",))
 
