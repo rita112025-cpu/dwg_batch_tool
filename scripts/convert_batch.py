@@ -23,7 +23,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import parallel
 from common import resolve, log_error, decode_console
-from convert_single import sha256, validate_dxf, safe_tmpdir, _terminate, publish_dxf
+from convert_single import sha256, safe_tmpdir, _terminate, install_dxf, mtime_or_none, note_retained
 
 OPEN_RE = re.compile(r"DWGBATCH_OPEN_(\d+)\|([^|\r\n]*)\|")
 DONE_RE = re.compile(r"DWGBATCH_DONE_(\d+)_")
@@ -199,6 +199,7 @@ def convert_many(items, accore, cfg, timeout=300, overwrite=False, stop_event=No
     jobs = []
     tmpdir = safe_tmpdir(logs)
     copies = []
+    previous = {}  # output path -> mtime of the DXF that was there before this run
     emit_lock = threading.Lock()
 
     def emit(rec):
@@ -206,6 +207,7 @@ def convert_many(items, accore, cfg, timeout=300, overwrite=False, stop_event=No
             _emit(rec)
 
     def _emit(rec):
+        note_retained(rec, previous.get(rec["output"]))
         if rec["status"] not in ("DXF_VALID", "SKIPPED_EXISTS", "STOPPED"):
             log_error(cfg, f"{rec['source']} -> {rec['status']} rc={rec['return_code']} {rec['error']}")
         results.append(rec)
@@ -215,6 +217,7 @@ def convert_many(items, accore, cfg, timeout=300, overwrite=False, stop_event=No
     for idx, (dwg, dxf) in enumerate(items):
         dwg, dxf = Path(dwg), Path(dxf)
         rec = _new_rec(dwg, dxf)
+        previous[rec["output"]] = mtime_or_none(dxf)
         try:
             if not dwg.is_file():
                 raise FileNotFoundError(f"DWG not found: {dwg}")
@@ -268,15 +271,13 @@ def convert_many(items, accore, cfg, timeout=300, overwrite=False, stop_event=No
         else:
             for _ in range(retries):
                 try:
-                    publish_dxf(tmp, job["dxf"])
+                    rec["status"], rec["error"], rec["file_size"] = install_dxf(tmp, job["dxf"])
                     break
                 except PermissionError:
                     time.sleep(0.25)
             else:
                 # AutoCAD keeps the last saved DXF open until the next document/exit
                 raise _Locked()
-            rec["status"], rec["error"] = validate_dxf(job["dxf"])
-            rec["file_size"] = job["dxf"].stat().st_size
         if job.get("sha_before") and sha256(job["dwg"]) != job["sha_before"]:
             rec["status"], rec["error"] = "SOURCE_MODIFIED", rec["error"] + " source DWG hash changed!"
         emit(rec)

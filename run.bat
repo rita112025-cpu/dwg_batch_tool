@@ -18,8 +18,8 @@ if %RC%==3 (
   echo [FATAL] conversion aborted
   exit /b 3
 )
-python scripts\analyze_dxf.py
-python scripts\find_scada.py
-python scripts\summary.py
+python scripts\analyze_dxf.py --this-run
+python scripts\find_scada.py --this-run
+python scripts\summary.py --this-run
 echo Done. batch return code=%RC%
 exit /b %RC%
