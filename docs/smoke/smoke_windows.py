@@ -6,7 +6,9 @@ SRC_DIR (default D:\\drawings\\input, override with --src). Exit code 0 = every 
 1 = a check failed, 2 = the process query failed (leftover state unknown).
 """
 import argparse
+import contextlib
 import hashlib
+import io
 import json
 import shutil
 import subprocess
@@ -23,6 +25,7 @@ import batch_convert  # noqa: E402
 import convert_single  # noqa: E402
 import find_scada  # noqa: E402
 import pipeline  # noqa: E402
+import summary  # noqa: E402
 
 SMALL_NAME = "DN-AR-SB12-0000_v29-圖紙 - AR 2021 - 夾層(2F)-1150903-20261119.dwg"
 LARGE_NAME = "DN-AR-SB12-0000_v29-圖紙 - AR 2031 - 穿堂-月台層(3F)-1150903-20261119.dwg"
@@ -208,15 +211,26 @@ def case_cli_reconvert_timeout(name, case_dir, files):
     inp, out, hashes = _fresh(case_dir, files)
     cfg1, cfg2 = _cfg(inp, out, 300), _cfg(inp, out, 0.3)
 
+    summaries = []
+
     def cli(cfg):
-        return [batch_convert.main(cfg), analyze_dxf.main(cfg, ["--this-run"]),
-                find_scada.main(cfg, ["--this-run"])]
+        rc = [batch_convert.main(cfg), analyze_dxf.main(cfg, ["--this-run"]),
+              find_scada.main(cfg, ["--this-run"])]
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            summary.main(cfg, ["--this-run"])
+        summaries.append(buf.getvalue())
+        return rc
+
+    def results_hash():
+        return {str(p): sha(p) for d in ("csv", "json") for p in sorted((out / d).rglob("*")) if p.is_file()}
 
     with Spy() as spy1:
         rc1, proc1 = _run_watched(lambda: cli(cfg1))
     dxfs = sorted((out / "dxf").rglob("*.dxf"))
     dxf_hash = {str(p): sha(p) for p in dxfs}
     index1 = (out / "csv" / "file_index.csv").read_bytes()
+    results1 = results_hash()
     with Spy() as spy2:
         rc2, proc2 = _run_watched(lambda: cli(cfg2))
     phase2 = [json.loads(line) for line in
@@ -229,12 +243,98 @@ def case_cli_reconvert_timeout(name, case_dir, files):
         "phase 2 failure says previous DXF kept": all(convert_single.RETAINED_NOTE in r["error"] for r in phase2),
         "phase 2 previous DXF unchanged": all(Path(p).exists() and sha(p) == h for p, h in dxf_hash.items()),
         "phase 2 analysis not run": not spy2.calls,
+        "phase 1 summary lists this run's rows": f"file_index.csv: {len(files)} rows" in summaries[0],
+        "phase 2 summary says analysis not run": "本次未執行分析" in summaries[1] and "file_index.csv:" not in summaries[1],
+        "phase 2 previous csv/json kept": results_hash() == results1 and bool(results1),
         "source hash unchanged": all(sha(inp / rel) == h for rel, h in hashes.items()),
         "no leftover process": not proc1["left"] and not proc2["left"],
         "no temp files left": not _temp_left(out),
     }
-    return dict(case=name, exit_codes=dict(phase1=rc1, phase2=rc2), phase1_calls=spy1.calls,
+    return dict(case=name, exit_codes=dict(phase1=rc1, phase2=rc2), summaries=summaries, phase1_calls=spy1.calls,
                 phase2_results=_recs(phase2), process=dict(phase1=proc1, phase2=proc2), checks=checks)
+
+
+def case_gui_stop(name, case_dir, files):
+    """Real App window: reconvert into a folder that already has DXFs, press 停止 on the first
+    DWG->DXF progress. Analysis and SCADA search must not start; every DXF this run did not
+    newly convert must keep its hash. Buttons are pressed with invoke(), not the mouse."""
+    import tkinter as tk
+    sys.path.insert(0, str(REPO))
+    import app as appmod
+
+    inp, out, hashes = _fresh(case_dir, files)
+    first = batch_convert.run(_cfg(inp, out, 300), log=lambda lv, m: None)
+    dxf_hash = {r["output"]: sha(r["output"]) for r in first["results"] if r["status"] == "DXF_VALID"}
+    dialogs, events = [], []
+    for fn in ("showinfo", "showwarning", "showerror"):
+        setattr(appmod.messagebox, fn, lambda title, msg="", _fn=fn, **k: dialogs.append((_fn, title, msg)))
+    for fn in ("askyesno", "askokcancel", "askyesnocancel"):
+        setattr(appmod.messagebox, fn, lambda title, msg="", _fn=fn, **k: dialogs.append((_fn, title, msg)) or False)
+
+    root = tk.Tk()
+    a = appmod.App(root)
+    a.v_in.set(str(inp))
+    a.v_out.set(str(out))
+    for key, value in dict(convert=True, analyze=True, scada=True, overwrite=True, recursive=True).items():
+        a.opts[key].set(value)
+    real_progress = a._on_task_progress
+
+    def on_progress(key, stage, i, n, cur):
+        events.append((stage, i, n))
+        if stage == "DWG→DXF" and str(a.btn_stop["state"]) == "normal" and not a.stop_event.is_set():
+            a.btn_stop.invoke()
+            events.append(("STOP_PRESSED", i, n))
+        return real_progress(key, stage, i, n, cur)
+
+    a._on_task_progress = on_progress
+    state = dict(started=False, t0=time.time())
+
+    def tick():
+        if not state["started"]:
+            if a.env_ok and str(a.btn_start["state"]) == "normal":
+                a.btn_start.invoke()
+                state["started"] = True
+            elif time.time() - state["t0"] > 60:
+                state["error"] = "environment check did not enable 開始處理 DWG within 60s"
+                root.quit()
+                return
+        elif not a._busy():
+            root.after(500, root.quit)  # let _poll render the result
+            return
+        root.after(100, tick)
+
+    def drive():
+        with Spy() as spy:
+            root.after(100, tick)
+            root.mainloop()
+        return spy
+
+    try:
+        spy, proc = _run_watched(drive)
+        result_text = a.v_result.get()
+    finally:
+        root.destroy()
+    this_run = {}
+    jl = out / "logs" / "batch_results.jsonl"
+    for line in jl.read_text(encoding="utf-8").splitlines()[len(first["results"]):]:
+        r = json.loads(line)
+        this_run[r["output"]] = r["status"]
+    kept = {p: h for p, h in dxf_hash.items() if this_run.get(p) != "DXF_VALID"}
+    checks = {
+        "started from the GUI": state["started"] and "error" not in state,
+        "stop pressed during DWG->DXF": any(e[0] == "STOP_PRESSED" for e in events),
+        "conversion stopped before the last file": len([s for s in this_run.values() if s == "DXF_VALID"]) < len(files),
+        "analysis not started": "analyze" not in spy.calls,
+        "SCADA search not started": "search" not in spy.calls,
+        "DXFs not reconverted keep their hash": bool(kept) and all(sha(p) == h for p, h in kept.items()),
+        "no error dialog": not [d for d in dialogs if d[0] == "showerror"],
+        "source hash unchanged": all(sha(inp / rel) == h for rel, h in hashes.items()),
+        "no leftover process": not proc["left"],
+        "no temp files left": not _temp_left(out),
+    }
+    return dict(case=name, error=state.get("error", ""), events=events[:20], dialogs=dialogs,
+                this_run_status=this_run, kept_unchanged=len(kept), result_text=result_text,
+                process=proc, checks=checks)
 
 
 def case_single_timeout(name, case_dir, files):
@@ -268,6 +368,7 @@ def main():
         ("D_reconvert_timeout", case_reconvert_timeout, [("t_large.dwg", large), ("t_small.dwg", small)]),
         ("E_timeout_single", case_single_timeout, [("t_large.dwg", large)]),
         ("F_runbat_reconvert_timeout", case_cli_reconvert_timeout, [("t_large.dwg", large), ("t_small.dwg", small)]),
+        ("G_gui_stop", case_gui_stop, [(f"g_{n:02d}.dwg", large) for n in range(8)]),
     ]
     base.mkdir(parents=True, exist_ok=True)
     report, code = [], 0

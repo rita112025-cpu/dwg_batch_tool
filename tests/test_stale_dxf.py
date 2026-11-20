@@ -201,6 +201,38 @@ def test_cli_analysis_skips_when_this_run_converted_nothing(tmp_path, monkeypatc
     assert not (Path(cfg["output_dir"]) / "csv" / "file_index.csv").exists()
 
 
+def test_cli_summary_says_analysis_did_not_run_and_hides_old_counts(tmp_path, monkeypatch, capsys):
+    """run.bat's last step must not present the previous run's CSV row counts as this run's result."""
+    import summary
+    cfg = dict(_cfg(tmp_path), accoreconsole=str(tmp_path / "accore.exe"))
+    (Path(cfg["input_dir"]) / "stale.dwg").write_bytes(HEADER)
+    stale = Path(cfg["output_dir"]) / "dxf" / "stale.dxf"
+    _old_dxf(stale)
+    assert analyze_dxf.main(cfg) == 0  # an earlier run's analysis
+    old_csv = (Path(cfg["output_dir"]) / "csv" / "file_index.csv").read_bytes()
+    _cli_convert(monkeypatch, cfg, [_rec("stale.dwg", stale, "DXF_INVALID", convert_single.RETAINED_NOTE)])
+    analyze_dxf.main(cfg, ["--this-run"])
+    capsys.readouterr()
+    assert summary.main(cfg, ["--this-run"]) == 0
+    text = capsys.readouterr().out
+    assert "本次未執行分析" in text and "file_index.csv:" not in text
+    assert (Path(cfg["output_dir"]) / "csv" / "file_index.csv").read_bytes() == old_csv
+
+
+def test_cli_summary_counts_this_runs_analysis(tmp_path, monkeypatch, capsys):
+    import summary
+    cfg = dict(_cfg(tmp_path), accoreconsole=str(tmp_path / "accore.exe"))
+    (Path(cfg["input_dir"]) / "good.dwg").write_bytes(HEADER)
+    good = Path(cfg["output_dir"]) / "dxf" / "good.dxf"
+    _old_dxf(good)
+    _cli_convert(monkeypatch, cfg, [_rec("good.dwg", good, "DXF_VALID")])
+    analyze_dxf.main(cfg, ["--this-run"])
+    capsys.readouterr()
+    assert summary.main(cfg, ["--this-run"]) == 0
+    text = capsys.readouterr().out
+    assert "file_index.csv: 1 rows" in text and "本次未執行分析" not in text
+
+
 def test_cli_this_run_without_a_conversion_record_fails(tmp_path):
     cfg = _cfg(tmp_path)
     assert analyze_dxf.main(cfg, ["--this-run"]) == 3
