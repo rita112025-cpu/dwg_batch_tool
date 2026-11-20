@@ -10,7 +10,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from common import load_config, resolve, log_error
+from common import load_config, resolve, log_error, this_run_targets
 from analyze_dxf import iter_layouts, xyz, mtext_plain, canonical_text
 import scada_rules
 from scada_rules import HIT_FIELDS, OBJECT_FIELDS, EXCLUDED
@@ -62,8 +62,9 @@ def _write(path, rows, fields):
         w.writerows(rows)
 
 
-def run(cfg, log=None, progress=None, stop_event=None):
-    """Returns dict(hits, objects, excluded, failed, stopped). Always writes the three CSVs
+def run(cfg, log=None, progress=None, stop_event=None, files=None):
+    """Search ``files`` (DXF paths under output/dxf), or every DXF there when ``files`` is None.
+    Returns dict(hits, objects, excluded, failed, stopped). Always writes the three CSVs
     (header only when nothing matched)."""
     log = log or (lambda level, msg: print(f"[{level}] {msg}"))
     progress = progress or (lambda i, n, cur: None)
@@ -74,7 +75,7 @@ def run(cfg, log=None, progress=None, stop_event=None):
     failed = 0
     failed_files = []
     stopped = False
-    files = sorted(root.rglob("*.dxf"))
+    files = sorted(root.rglob("*.dxf")) if files is None else sorted(Path(p) for p in files)
     for n, p in enumerate(files, 1):
         if stop_event is not None and stop_event.is_set():
             stopped = True
@@ -100,8 +101,13 @@ def run(cfg, log=None, progress=None, stop_event=None):
                 failed_files=failed_files, stopped=stopped)
 
 
-def main(cfg=None):
-    s = run(cfg or load_config())
+def main(cfg=None, argv=None):
+    """``--this-run``: search only the DXFs the latest batch_convert.py run produced."""
+    cfg = cfg or load_config()
+    files, code = this_run_targets(cfg, sys.argv[1:] if argv is None else argv)
+    if code is not None:
+        return code
+    s = run(cfg, files=files)
     print(f"keyword hits: {s['hits']}  unique matched objects: {s['objects']}  "
           f"excluded noise: {s['excluded']}")
     return 0

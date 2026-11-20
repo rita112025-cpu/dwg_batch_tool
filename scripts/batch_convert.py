@@ -6,7 +6,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from common import load_config, resolve, log_error
+from common import load_config, resolve, log_error, clear_this_run, write_this_run
 from convert_batch import convert_many
 from parallel import clamp_workers
 
@@ -84,8 +84,14 @@ def run(cfg, log=None, progress=None, stop_event=None):
     return stats
 
 
+def converted_paths(results):
+    """Output DXFs of this run that analysis may use (a failed reconvert keeps an old DXF on disk)."""
+    return [Path(r["output"]) for r in results if r["status"] in OK_STATUS]
+
+
 def main(cfg=None):
     cfg = cfg or load_config()
+    clear_this_run(cfg)  # a stopped or crashed run must not leave the previous list behind
     try:
         s = run(cfg)
     except KeyboardInterrupt:
@@ -94,6 +100,8 @@ def main(cfg=None):
     if s["fatal"]:
         print("FATAL:", s["fatal"])
         return 3
+    if not s["stopped"]:
+        write_this_run(cfg, converted_paths(s["results"]))
     print(f"done: ok={s['ok']} failed={s['failed']} skipped={s['skipped']} total={s['total']}")
     return 0 if s["failed"] == 0 else 1
 

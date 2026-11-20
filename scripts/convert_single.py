@@ -117,6 +117,41 @@ def publish_dxf(source, destination):
             staging.unlink(missing_ok=True)
 
 
+RETAINED_NOTE = "重轉失敗，既有 DXF 為上次結果"
+
+
+def install_dxf(tmp, dxf):
+    """Validate the freshly saved ``tmp`` next to ``dxf`` and only then replace ``dxf``.
+    An invalid result is discarded so the previous good DXF stays. Returns (status, detail, size).
+    PermissionError from moving ``tmp`` (AutoCAD still holding it) propagates to the caller."""
+    dxf = Path(dxf)
+    staging = dxf.with_name(f"{dxf.name}.{uuid.uuid4().hex}.part")
+    publish_dxf(tmp, staging)
+    try:
+        status, detail = validate_dxf(staging)
+        if status != "DXF_VALID":
+            return status, detail, 0
+        os.replace(staging, dxf)
+        return status, detail, dxf.stat().st_size
+    finally:
+        staging.unlink(missing_ok=True)
+
+
+def mtime_or_none(p):
+    try:
+        return Path(p).stat().st_mtime_ns
+    except OSError:
+        return None
+
+
+def note_retained(rec, previous_mtime):
+    """On a failed reconvert, say that the DXF still on disk is the previous result."""
+    if rec["status"] in ("DXF_VALID", "SKIPPED_EXISTS", "STOPPED") or previous_mtime is None:
+        return
+    if mtime_or_none(rec["output"]) == previous_mtime:
+        rec["error"] = f"{rec['error']}; {RETAINED_NOTE}" if rec["error"] else RETAINED_NOTE
+
+
 def _terminate(proc):
     """Stop only the process we created (never other AutoCAD processes)."""
     try:
@@ -168,6 +203,7 @@ def convert(dwg, dxf, accore, cfg=None, timeout=300, overwrite=False, stop_event
     rec = dict(source=str(dwg), output=str(dxf), status="", return_code=None,
                file_size=0, elapsed_seconds=0.0, error="")
     t0 = time.time()
+    previous = mtime_or_none(dxf)
     try:
         if not Path(accore).exists():
             raise FileNotFoundError(f"accoreconsole not found: {accore}")
@@ -214,11 +250,7 @@ def convert(dwg, dxf, accore, cfg=None, timeout=300, overwrite=False, stop_event
             elif tmp_dxf.stat().st_size == 0:
                 rec["error"] = "DXF is 0 bytes"
         if not rec["error"]:
-            publish_dxf(tmp_dxf, dxf)
-            status, detail = validate_dxf(dxf)
-            rec["status"] = status
-            rec["error"] = detail
-            rec["file_size"] = dxf.stat().st_size
+            rec["status"], rec["error"], rec["file_size"] = install_dxf(tmp_dxf, dxf)
         else:
             rec["status"] = "DXF_INVALID"
             if tmp_dxf.exists():
@@ -230,6 +262,7 @@ def convert(dwg, dxf, accore, cfg=None, timeout=300, overwrite=False, stop_event
     except Exception as e:  # noqa: BLE001
         rec["status"] = "ERROR"
         rec["error"] = f"{type(e).__name__}: {e}"
+    note_retained(rec, previous)
     rec["elapsed_seconds"] = round(time.time() - t0, 2)
     if rec["status"] not in ("DXF_VALID", "SKIPPED_EXISTS", "STOPPED"):
         log_error(cfg, f"{rec['source']} -> {rec['status']} rc={rec['return_code']} {rec['error']}")

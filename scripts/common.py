@@ -32,6 +32,47 @@ def resolve(cfg, key):
     return p if p.is_absolute() else ROOT / p
 
 
+THIS_RUN_FILE = "converted_this_run.json"
+
+
+def _this_run_path(cfg):
+    return resolve(cfg, "output_dir") / "logs" / THIS_RUN_FILE
+
+
+def write_this_run(cfg, paths):
+    """Record the DXFs the latest conversion produced (or kept on purpose) for --this-run."""
+    p = _this_run_path(cfg)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps([str(x) for x in paths], ensure_ascii=False), encoding="utf-8")
+
+
+def clear_this_run(cfg):
+    _this_run_path(cfg).unlink(missing_ok=True)
+
+
+def read_this_run(cfg):
+    """DXF paths from the latest conversion, or None when no finished conversion is recorded."""
+    try:
+        return [Path(x) for x in json.loads(_this_run_path(cfg).read_text(encoding="utf-8"))]
+    except (OSError, ValueError):
+        return None
+
+
+def this_run_targets(cfg, argv):
+    """CLI helper for analyze_dxf.py / find_scada.py. Returns (files, exit_code):
+    files None = scan the whole folder; exit_code set = stop with that code."""
+    if "--this-run" not in argv:
+        return None, None
+    files = read_this_run(cfg)
+    if files is None:
+        print(f"FATAL: no finished conversion recorded ({THIS_RUN_FILE}); run batch_convert.py first")
+        return None, 3
+    if not files:
+        print("本次沒有成功轉出的 DXF，略過分析")
+        return None, 0
+    return files, None
+
+
 def log_error(cfg_or_dir, msg):
     """Append to output/logs/errors.log (never just print)."""
     if isinstance(cfg_or_dir, dict):
