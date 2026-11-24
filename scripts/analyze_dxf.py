@@ -7,7 +7,7 @@ from collections import Counter
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from common import load_config, resolve, log_error
+from common import load_config, resolve, log_error, this_run_targets
 
 import ezdxf
 import scada_rules
@@ -144,8 +144,10 @@ def write_csv(path, rows, fields):
         w.writerows(rows)
 
 
-def run(cfg, write_csv_files=True, write_json_files=True, log=None, progress=None, stop_event=None):
-    """Analyze every DXF under output/dxf. Returns dict(total, ok, failed, stopped)."""
+def run(cfg, write_csv_files=True, write_json_files=True, log=None, progress=None, stop_event=None,
+        files=None):
+    """Analyze ``files`` (DXF paths under output/dxf), or every DXF there when ``files`` is None.
+    Returns dict(total, ok, failed, stopped)."""
     log = log or (lambda level, msg: print(f"[{level}] {msg}"))
     progress = progress or (lambda i, n, cur: None)
     out = resolve(cfg, "output_dir")
@@ -153,7 +155,7 @@ def run(cfg, write_csv_files=True, write_json_files=True, log=None, progress=Non
     (out / "csv").mkdir(parents=True, exist_ok=True)
     (out / "json").mkdir(parents=True, exist_ok=True)
     idx, layers, texts, blocks, dims, attribs = [], [], [], [], [], []
-    files = sorted(dxf_root.rglob("*.dxf"))
+    files = sorted(dxf_root.rglob("*.dxf")) if files is None else sorted(Path(p) for p in files)
     rules = scada_rules.build_rules(cfg)
     stats = dict(total=len(files), ok=0, failed=0, stopped=False, suspect=0, failed_files=[])
     for n, p in enumerate(files, 1):
@@ -210,8 +212,13 @@ def run(cfg, write_csv_files=True, write_json_files=True, log=None, progress=Non
     return stats
 
 
-def main(cfg=None):
-    s = run(cfg or load_config())
+def main(cfg=None, argv=None):
+    """``--this-run``: analyze only the DXFs the latest batch_convert.py run produced."""
+    cfg = cfg or load_config()
+    files, code = this_run_targets(cfg, sys.argv[1:] if argv is None else argv)
+    if code is not None:
+        return code
+    s = run(cfg, files=files)
     return 0 if s["failed"] == 0 else 1
 
 

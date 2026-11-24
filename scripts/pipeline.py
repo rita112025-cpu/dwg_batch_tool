@@ -305,6 +305,7 @@ def run_pipeline(cfg, opts, log=None, progress=None, stop_event=None):
         return finish()
     _log("OK", f"environment OK ({env['autocad']}, ezdxf {env['ezdxf']})")
 
+    targets = None  # None = analyze every DXF in the folder (analyze-only run)
     if opts["convert"]:
         n = len(batch_convert.list_dwg(cfg))
         _log("INFO", f"found {n} DWG")
@@ -319,11 +320,17 @@ def run_pipeline(cfg, opts, log=None, progress=None, stop_event=None):
             summary["stopped"] = True
             _log("WARN", "stopped by user")
             return finish()
+        # Only this run's results: a failed reconvert leaves the previous DXF on disk.
+        targets = batch_convert.converted_paths(s["results"])
     summary["dxf"] = len(list((out / "dxf").rglob("*.dxf")))
+    if targets == [] and (opts["analyze"] or opts["scada"]):
+        _log("WARN", "本次沒有成功轉出的 DXF，略過分析與 SCADA 搜尋")
+        opts = dict(opts, analyze=False, scada=False)
 
     if opts["analyze"] and not stopped():
         _log("INFO", "analyzing DXF")
-        a = analyze_dxf.run(cfg, opts["csv"], opts["json"], _log, _prog("Analyze"), stop_event)
+        a = analyze_dxf.run(cfg, opts["csv"], opts["json"], _log, _prog("Analyze"), stop_event,
+                            files=targets)
         if a["failed"]:
             _log("WARN", f"{a['failed']} DXF failed to analyze")
         summary["analyze_failed"] = a["failed"]
@@ -332,7 +339,7 @@ def run_pipeline(cfg, opts, log=None, progress=None, stop_event=None):
         summary["stopped"] |= a["stopped"]
     if opts["scada"] and not stopped():
         _log("INFO", "SCADA keyword search")
-        r = find_scada.run(cfg, _log, _prog("SCADA"), stop_event)
+        r = find_scada.run(cfg, _log, _prog("SCADA"), stop_event, files=targets)
         summary["keyword_hits"] = r["hits"]
         summary["unique_objects"] = r["objects"]
         summary["failed_files"] += [f"(search) {x}" for x in r["failed_files"]]
