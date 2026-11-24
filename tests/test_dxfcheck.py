@@ -55,6 +55,17 @@ def test_title_block_attributes_and_extents(tmp_path):
     assert dxfcheck.layer_extents(doc, "NOPE") is None
 
 
+def test_cli_flags_type_change_with_equal_totals(tmp_path):
+    a = _make(tmp_path / "a.dxf", 3, 2)
+    doc = ezdxf.readfile(a)
+    msp = doc.modelspace()
+    poly = msp.query("LWPOLYLINE").first
+    msp.delete_entity(poly)
+    msp.add_arc((0, 0), 1, 0, 90, dxfattribs={"layer": "A-FLOR"})
+    doc.saveas(tmp_path / "b.dxf")
+    assert dxfcheck.main(["compare", str(a), str(tmp_path / "b.dxf"), "--layers", "A-FLOR"]) == 1
+
+
 def test_cli_exit_codes(tmp_path, capsys):
     a = _make(tmp_path / "a.dxf", 3, 2)
     b = _make(tmp_path / "b.dxf", 3, 2)

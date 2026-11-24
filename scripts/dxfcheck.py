@@ -166,7 +166,7 @@ def main(argv=None):
         print(json.dumps(rows, ensure_ascii=False, indent=2))
     else:
         print(_format_compare(rows, args.left.stem, args.right.stem))
-    return 1 if any(r["diff"] for r in rows) else 0
+    return 1 if any(r["diff"] or r["by_type"] for r in rows) else 0
 
 
 if __name__ == "__main__":
