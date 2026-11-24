@@ -268,6 +268,14 @@ MTEXT 會把新的純文字嵌回原本的格式碼，所以沒改到的字仍�
 - 物件配對：先用 handle，handle 對不上時用「類型＋圖層＋配置＋幾何指紋」，再用「座標差都在容差內」。座標容差預設 `0.001`。取消「優先以 handle 配對」就只用幾何配對。
 - 輸出（`輸出\dwgdiff\`）：`diff_summary.csv`（每組檔案一列：狀態、新增／刪除／修改數、各類別數量）、`diff_details.csv`（每筆變更：file、category、change_type=ADDED/REMOVED/MODIFIED、layer、handle、field、before、after、position）、`diff_report.json`（同樣內容加比對參數）。
 
+### DXF 檢查（圖層圖元數量比對）
+先用 AutoCAD 流程輸出 DXF，再用 `scripts\dxfcheck.py` 檢查（只讀、不需 AutoCAD）。圖層名稱不分大小寫、可用萬用字元；預設只算 ModelSpace，INSERT 算一個圖元。
+```
+.venv\Scripts\python scripts\dxfcheck.py inspect <檔.dxf> [--layers A-WALL,A-FLOR] [--title-block "TITLE*"] [--all-layouts]
+.venv\Scripts\python scripts\dxfcheck.py compare <SB16_B1_a.dxf> <SB16_B1_b.dxf> --layers A-WALL,A-FLOR [--json]
+```
+`compare` 逐圖層列出兩檔圖元數與依類型的差異；有差異時 exit 1，讀檔失敗 exit 2。
+
 命令列：
 ```
 .venv\Scripts\python scripts\dwgdiff.py <舊版> <新版> <輸出資料夾> [--accore <accoreconsole.exe>] [--tolerance 0.001] [--no-handles]
