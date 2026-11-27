@@ -179,12 +179,18 @@ def _parse_cad(path, store, cfg, out, stop_event):
     from engineering_data import evidence, digest
     from convert_single import convert
     token = __import__('hashlib').sha256(str(path).encode()).hexdigest()[:12]
-    target = path
+    import ezdxf
+    import scada_rules
+    target, doc = path, None
     if path.suffix.lower() == '.dwg':
         target = out / 'cad' / 'dxf' / (path.stem + '_' + token + '.dxf')
-        result = convert(path, target, cfg['accoreconsole'], cfg, overwrite=True, stop_event=stop_event)
+        result = convert(path, target, cfg['accoreconsole'], cfg, overwrite=True, stop_event=stop_event, keep_doc=True)
+        doc = result.pop('doc', None)
         if result['status'] != 'DXF_VALID': raise RuntimeError(str(result))
-    rows, info = analyze_dxf.analyze(target, str(path))
+    if doc is None:
+        doc = ezdxf.readfile(target)
+    rules = scada_rules.build_rules(cfg)
+    rows, info = analyze_dxf.analyze(target, str(path), doc=doc)
     attributes = {}
     for attr in rows['attribs']:
         attributes.setdefault(attr.get('parent_handle'), []).append(attr)
@@ -204,10 +210,8 @@ def _parse_cad(path, store, cfg, out, stop_event):
     json_dir = out / 'cad' / 'json'
     json_dir.mkdir(parents=True, exist_ok=True)
     (json_dir / (path.stem + '_' + token + '.json')).write_text(json.dumps(dict(index=info, **rows), ensure_ascii=False), encoding='utf-8')
-    import ezdxf
-    import scada_rules
-    hits, excluded = find_scada.search_doc(ezdxf.readfile(target), str(path), scada_rules.build_rules(cfg))
-    for name, values in [('scada_hits', hits), ('scada_excluded', excluded), ('object_hits', scada_rules.build_object_hits(hits)), ('block_summary', scada_rules.build_block_summary(rows['blocks'], scada_rules.build_rules(cfg), rows['attribs']))]:
+    hits, excluded = find_scada.search_doc(doc, str(path), rules)
+    for name, values in [('scada_hits', hits), ('scada_excluded', excluded), ('object_hits', scada_rules.build_object_hits(hits)), ('block_summary', scada_rules.build_block_summary(rows['blocks'], rules, rows['attribs']))]:
         for row in values: store.report('cad/'+name+'.csv', dict(row, **evidence(path, 'CAD', row.get('handle', ''))))
     store.report('cad/file_index.csv', evidence(path, 'CAD', **info, status='OK'))
     return 'OK'

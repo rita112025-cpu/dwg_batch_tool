@@ -56,16 +56,22 @@ def copy_hashed(src, dest, n=1 << 20):
 
 def validate_dxf(path):
     """Return (status, detail). Never trust the AutoCAD return code alone."""
+    status, detail, _doc = read_valid_dxf(path)
+    return status, detail
+
+
+def read_valid_dxf(path):
+    """Return (status, detail, doc); ``doc`` is the parsed document when valid, else None."""
     p = Path(path)
     if not p.exists():
-        return "DXF_INVALID", "file missing"
+        return "DXF_INVALID", "file missing", None
     if p.stat().st_size == 0:
-        return "DXF_INVALID", "0 bytes"
+        return "DXF_INVALID", "0 bytes", None
     try:
-        ezdxf.readfile(str(p))
+        doc = ezdxf.readfile(str(p))
     except Exception as e:  # noqa: BLE001
-        return "DXF_INVALID", f"ezdxf: {type(e).__name__}: {e}"
-    return "DXF_VALID", ""
+        return "DXF_INVALID", f"ezdxf: {type(e).__name__}: {e}", None
+    return "DXF_VALID", "", doc
 
 
 def _short_path(p):
@@ -159,8 +165,12 @@ def run_accore(cmd, timeout, stop_event=None):
             return -1, out, err, why
 
 
-def convert(dwg, dxf, accore, cfg=None, timeout=300, overwrite=False, stop_event=None):
-    """Returns dict(source, output, status, return_code, file_size, elapsed_seconds, error)."""
+def convert(dwg, dxf, accore, cfg=None, timeout=300, overwrite=False, stop_event=None, keep_doc=False):
+    """Returns dict(source, output, status, return_code, file_size, elapsed_seconds, error).
+
+    With ``keep_doc=True`` a valid result also carries ``doc``: the ezdxf document parsed during
+    validation, so the caller does not have to read the DXF again.
+    """
     cfg = cfg or load_config()
     dwg, dxf = Path(dwg), Path(dxf)
     logs = resolve(cfg, "output_dir") / "logs"
@@ -215,9 +225,11 @@ def convert(dwg, dxf, accore, cfg=None, timeout=300, overwrite=False, stop_event
                 rec["error"] = "DXF is 0 bytes"
         if not rec["error"]:
             publish_dxf(tmp_dxf, dxf)
-            status, detail = validate_dxf(dxf)
+            status, detail, doc = read_valid_dxf(dxf)
             rec["status"] = status
             rec["error"] = detail
+            if keep_doc and doc is not None:
+                rec["doc"] = doc
             rec["file_size"] = dxf.stat().st_size
         else:
             rec["status"] = "DXF_INVALID"

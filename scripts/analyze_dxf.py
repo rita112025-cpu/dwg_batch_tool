@@ -76,8 +76,10 @@ def mtext_plain(e):
     return decode_dxf_unicode(text)
 
 
-def analyze(dxf_path, rel_name):
-    doc = ezdxf.readfile(str(dxf_path))
+def analyze(dxf_path, rel_name, doc=None):
+    """``doc`` may be an already-parsed ezdxf document of ``dxf_path`` (avoids a second read)."""
+    if doc is None:
+        doc = ezdxf.readfile(str(dxf_path))
     res = dict(layers=[], texts=[], blocks=[], dimensions=[], attribs=[], entity_types=Counter())
     layer_count = Counter()
     for layout in iter_layouts(doc):
