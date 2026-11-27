@@ -7,6 +7,7 @@ MessageBox, an early exit, a stall longer than ``timeout`` or ``stop_event``.
 """
 from __future__ import annotations
 
+import codecs
 import subprocess
 import sys
 import time
@@ -20,11 +21,46 @@ from convert_batch import (  # noqa: E402
     DONE_RE,
     OPEN_RE,
     _Reader,
-    _decode,
     _has_blocking_messagebox,
     blocking_failure_message,
 )
 from convert_single import _terminate  # noqa: E402
+
+
+class ConsoleText:
+    """accoreconsole stdout (UTF-16-LE) decoded incrementally.
+
+    ``feed()`` decodes only the bytes added since the previous call, so polling a long
+    batch costs time proportional to the new output instead of the whole buffer. An
+    incremental decoder keeps an odd trailing byte or half a surrogate pair for the next
+    call instead of turning it into U+FFFD.
+    """
+
+    def __init__(self):
+        self.text = ""
+        self.byte_count = 0
+        self._decoder = codecs.getincrementaldecoder("utf-16-le")(errors="replace")
+
+    def feed(self, buf):
+        """Decode new bytes of ``buf`` (the whole reader buffer). Returns True if any arrived."""
+        end = len(buf)
+        if end == self.byte_count:
+            return False
+        chunk = bytes(buf[self.byte_count:end])
+        self.byte_count = end
+        self.text += self._decoder.decode(chunk)
+        return True
+
+
+def marker_scan_start(text, previous_start):
+    """Where the next marker scan may begin without missing a marker cut by a read.
+
+    OPEN/DONE markers never contain a line break, so a marker that was still incomplete
+    can only start after the last line break. Markers found again are ignored by the
+    callers (already opened / already consumed).
+    """
+    newline = text.rfind("\n", previous_start)
+    return previous_start if newline < 0 else newline + 1
 
 
 def run_launch(jobs, accore, lisp_path, script_text, timeout, stop_event, on_file_start, logs, prefix):
@@ -55,24 +91,24 @@ def run_launch(jobs, accore, lisp_path, script_text, timeout, stop_event, on_fil
     last_progress = time.time()
     fail_msg, stopped = "", False
     scan_from = 0
-    seen_chars = 0
+    marker_from = 0
+    console = ConsoleText()
     try:
         while consumed < len(jobs):
             time.sleep(0.2)
-            text = _decode(reader.buf)
-            if len(text) != seen_chars:
+            if console.feed(reader.buf):
                 # A large DWG keeps printing (block-index updates, enablers) for the
                 # whole QSAVE, and only then prints DONE. Silence is a stall.
                 last_progress = time.time()
-                seen_chars = len(text)
-            for match in OPEN_RE.finditer(text):
+            text = console.text
+            for match in OPEN_RE.finditer(text, marker_from):
                 index = int(match.group(1))
                 if index not in opened and index < len(jobs):
                     opened[index] = match.group(2)
                     opened_at[index] = time.time()
                     last_progress = time.time()
                     on_file_start(jobs[index])
-            for match in DONE_RE.finditer(text):
+            for match in DONE_RE.finditer(text, max(marker_from, scan_from)):
                 index = int(match.group(1))
                 if index == consumed and index < len(jobs):
                     jobs[index]["opened_name"] = opened.get(index, "")
@@ -81,6 +117,7 @@ def run_launch(jobs, accore, lisp_path, script_text, timeout, stop_event, on_fil
                     consumed += 1
                     last_progress = time.time()
                     scan_from = match.end()
+            marker_from = marker_scan_start(text, marker_from)
             if consumed >= len(jobs):
                 break
             if stop_event is not None and stop_event.is_set():
@@ -91,7 +128,7 @@ def run_launch(jobs, accore, lisp_path, script_text, timeout, stop_event, on_fil
                 break
             if proc.poll() is not None:
                 time.sleep(0.3)
-                if len(_decode(reader.buf)) == len(text):
+                if len(reader.buf) == console.byte_count:
                     fail_msg = f"accoreconsole 提前結束（rc={proc.returncode}）"
                     break
             elif time.time() - last_progress > timeout:
